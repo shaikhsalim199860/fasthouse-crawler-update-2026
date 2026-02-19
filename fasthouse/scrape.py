@@ -398,57 +398,72 @@ class FasthouseScraper(BaseScraper):
         return {"Is Main Image Background White": False}
 
     def get_images_v2(self, product_row: dict, folderize: bool = True) -> list:
-        # productView-thumbnail is the place to start with.
-        # 540x is an option. If not available, go for the others, else drop down to the defaulkt one available as thumbnail.
-        # Assumption:
-        # - 140 px will always be the thumbnail size
-        # - That thumbnails will always exist?
-        #       - If they do not fall back to -> productView-image
         asin = product_row.get("ASIN")
         if pd.isna(asin):
             asin = product_row["Seller SKU"]
 
         print(f"Fetching images for ASIN via v2: {asin}")
 
-        # Check if thumbnails exist
         thumbnails = self.soup.select(".product__thumbnail")
         image_urls = []
 
         if thumbnails:
             for index, thumbnail in enumerate(thumbnails):
 
-                # We need to have a check for the total no of images should not exceed 9.
                 if index == 9:
                     image_urls.append({"Exceeded 9 images": True})
-
                     break
 
                 meta = self._get_image_metadata(asin=asin, index=index)
                 img_name, image_url_col_name = meta["img_name"], meta["image_url_col_name"]
 
-                thumbnail_url: str = thumbnail.img["src"]
-                # Assumption: 140 and 540 exist.
-                url = f"https:{thumbnail_url.replace('140x140', '1200x')}"
-                # Append to `image_urls` which will be displayed in the final df
-                image_urls.append({image_url_col_name: url})
+                # ---- SAFE IMAGE EXTRACTION ----
+                try:
+                    if not thumbnail or not thumbnail.img or not thumbnail.img.get("src"):
+                        print(f"[WARN] Missing thumbnail image for {asin} index {index}")
+                        continue
 
-                self._image_download_and_save(url=url, img_name=img_name, folderize=folderize)
+                    thumbnail_url: str = thumbnail.img["src"]
+                    url = f"https:{thumbnail_url.replace('140x140', '1200x')}"
+
+                    image_urls.append({image_url_col_name: url})
+                    self._image_download_and_save(url=url, img_name=img_name, folderize=folderize)
+
+                except Exception as e:
+                    print(f"[ERROR] Thumbnail failed for {asin} index {index}: {e}")
+                    continue
 
         else:
             # Only a single image exists
             img_name = f"{asin}.main.jpg"
             image_url_col_name = "main"
-            url = f"https:{self.soup.select_one('.productView-image').img['src']}"
-            url = url.replace("300x", "1200x")
 
-            image_urls.append({image_url_col_name: url})
+            try:
+                container = self.soup.select_one('.productView-image')
 
-            self._image_download_and_save(url=url, img_name=img_name, folderize=folderize)
+                if not container or not container.img or not container.img.get("src"):
+                    print(f"[ERROR] Main image not found for {asin}")
+                    image_urls.append({"main_image_missing": True})
+                else:
+                    url = f"https:{container.img['src']}"
+                    url = url.replace("300x", "1200x")
 
-        # Check if the background of the main image is white
-        image_urls.append(self.is_prominent_bg_col_white(f"{self.assets_folder}/{asin}.main.jpg"))
+                    image_urls.append({image_url_col_name: url})
+                    self._image_download_and_save(url=url, img_name=img_name, folderize=folderize)
+
+            except Exception as e:
+                print(f"[ERROR] Main image extraction failed for {asin}: {e}")
+                image_urls.append({"main_image_error": True})
+
+        # ---- SAFE BACKGROUND CHECK ----
+        try:
+            image_urls.append(self.is_prominent_bg_col_white(f"{self.assets_folder}/{asin}.main.jpg"))
+        except Exception as e:
+            print(f"[WARN] Background check skipped for {asin}: {e}")
+            image_urls.append({"bg_check_failed": True})
 
         return image_urls
+
     
     def get_size_chart(self, product_row: dict, folderize: bool = True) -> str:
         asin = product_row.get("ASIN") or product_row.get("Seller SKU")
