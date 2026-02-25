@@ -1,4 +1,3 @@
-import os
 import shutil
 from pathlib import Path
 
@@ -19,12 +18,22 @@ ARTIFACTS_DIR = Path("./artifacts")
 
 
 # -----------------------
+# Page Config
+# -----------------------
+
+st.set_page_config(
+    page_title="Fasthouse & Seven Crawler",
+    layout="wide"
+)
+
+
+# -----------------------
 # Sidebar Controls
 # -----------------------
 
 website = st.sidebar.radio(
-    label="Select Website to crawl",
-    options=["Fasthouse", "Seven"]
+    "Select Website to crawl",
+    ["Fasthouse", "Seven"]
 )
 
 crawl_options = ["Data", "Images"]
@@ -32,30 +41,31 @@ if website == "Fasthouse":
     crawl_options.append("A+ Images")
 
 crawl_type = st.sidebar.radio(
-    label="Select Crawling Type",
-    options=crawl_options
+    "Select Crawling Type",
+    crawl_options
 )
 
 
 # -----------------------
-# Display Banner Image
+# Display Banner
 # -----------------------
 
 image_path = ARTIFACTS_DIR / f"{website}.jpg"
 if image_path.exists():
-    st.image(Image.open(image_path))
+    st.image(Image.open(image_path), use_column_width=True)
 
 
-st.header(f"{website} Crawler: {crawl_type} mode")
+st.title(f"{website} Crawler")
+st.subheader(f"Mode: {crawl_type}")
 
 st.info("""
-Required Columns:
-- Seller SKU
-- URL
-- No of bullets (Not required for Seven)
+**Required Columns**
+- Seller SKU  
+- URL  
+- No of bullets *(Not required for Seven)*  
 
-Optional:
-- ASIN (for images)
+**Optional**
+- ASIN *(Required for image modes if available)*
 """)
 
 
@@ -78,30 +88,14 @@ def convert_df(df: pd.DataFrame):
 
 
 def clean_assets():
-    """Delete and recreate assets folder safely."""
     if ASSETS_DIR.exists():
         shutil.rmtree(ASSETS_DIR)
     ASSETS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def zip_assets(website: str):
-    """Create ZIP archive from assets directory."""
-    zip_path = shutil.make_archive(website, "zip", ASSETS_DIR)
-    return zip_path
+    return shutil.make_archive(website, "zip", ASSETS_DIR)
 
-
-# -----------------------
-# File Upload
-# -----------------------
-
-uploaded_file = st.file_uploader("Upload a CSV File...", type=["csv"])
-
-run = st.button("Run Scraper")
-
-
-# -----------------------
-# Required Columns
-# -----------------------
 
 def get_required_columns(website, crawl_type):
     if website == "Seven":
@@ -113,6 +107,13 @@ def get_required_columns(website, crawl_type):
     return ["Seller SKU", "URL", "No of bullets"]
 
 
+# -----------------------
+# File Upload
+# -----------------------
+
+uploaded_file = st.file_uploader("Upload CSV file", type=["csv"])
+run = st.button("Run Scraper", type="primary")
+
 crawler = fetch_text_and_images if website == "Fasthouse" else start
 
 
@@ -123,40 +124,52 @@ crawler = fetch_text_and_images if website == "Fasthouse" else start
 if run:
 
     if not uploaded_file:
-        st.warning("Please upload a CSV file before running the scraper.")
+        st.warning("Please upload a CSV file first.")
         st.stop()
 
     df = pd.read_csv(uploaded_file)
     required_columns = get_required_columns(website, crawl_type)
 
     if not all(col in df.columns for col in required_columns):
-        st.error(f"Required columns missing. Needed: {required_columns}")
+        st.error(f"Missing required columns. Needed: {required_columns}")
         st.stop()
 
     try:
+
         # Clean assets for image modes
         if crawl_type in ["Images", "A+ Images"]:
             clean_assets()
 
-        with st.spinner("Running scraper..."):
-            output = crawler(df, return_mode(crawl_type), progress_bar=True)
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+
+        # Run scraper
+        output = crawler(
+            df,
+            return_mode(crawl_type),
+            progress_bar=progress_bar,
+            status_text=status_text
+        )
+
+        progress_bar.empty()
+        status_text.empty()
 
         st.success(f"{crawl_type} scraping completed successfully 🎉")
         st.balloons()
 
         # -----------------------
-        # Data Mode
+        # DATA MODE
         # -----------------------
         if crawl_type == "Data":
             st.download_button(
-                label="Download Data",
+                label="Download Data CSV",
                 data=convert_df(output),
                 file_name=f"{website}.csv",
                 mime="text/csv"
             )
 
         # -----------------------
-        # Image Modes
+        # IMAGE MODES
         # -----------------------
         if crawl_type in ["Images", "A+ Images"]:
 
@@ -171,7 +184,7 @@ if run:
 
             with open(zip_path, "rb") as f:
                 st.download_button(
-                    label="Download Images",
+                    label="Download Images ZIP",
                     data=f,
                     file_name=f"{website}.zip",
                     mime="application/zip"
