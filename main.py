@@ -1,4 +1,5 @@
 import shutil
+import inspect
 from pathlib import Path
 
 from PIL import Image
@@ -52,7 +53,7 @@ crawl_type = st.sidebar.radio(
 
 image_path = ARTIFACTS_DIR / f"{website}.jpg"
 if image_path.exists():
-    st.image(Image.open(image_path), use_column_width=True)
+    st.image(Image.open(image_path), use_container_width=True)
 
 
 st.title(f"{website} Crawler")
@@ -107,6 +108,27 @@ def get_required_columns(website, crawl_type):
     return ["Seller SKU", "URL", "No of bullets"]
 
 
+def run_crawler_safe(crawler, df, mode, progress_bar, status_text):
+    """
+    Calls crawler safely depending on whether it supports progress arguments.
+    """
+    sig = inspect.signature(crawler)
+
+    if "progress_bar" in sig.parameters:
+        return crawler(
+            df,
+            mode,
+            progress_bar=progress_bar,
+            status_text=status_text
+        )
+    else:
+        # fallback if scraper not updated yet
+        status_text.text("Running scraper...")
+        result = crawler(df, mode)
+        progress_bar.progress(1.0)
+        return result
+
+
 # -----------------------
 # File Upload
 # -----------------------
@@ -136,19 +158,18 @@ if run:
 
     try:
 
-        # Clean assets for image modes
         if crawl_type in ["Images", "A+ Images"]:
             clean_assets()
 
         progress_bar = st.progress(0)
         status_text = st.empty()
 
-        # Run scraper
-        output = crawler(
+        output = run_crawler_safe(
+            crawler,
             df,
             return_mode(crawl_type),
-            progress_bar=progress_bar,
-            status_text=status_text
+            progress_bar,
+            status_text
         )
 
         progress_bar.empty()
