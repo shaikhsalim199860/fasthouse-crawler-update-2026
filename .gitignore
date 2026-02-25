@@ -1,7 +1,8 @@
-.DS_Store
-assets/
-inputs/
-outputs/
+__pycache__/
 *.pyc
+.env
+assets/
+outputs/
 *.csv
-venv/
+*.log
+.vscode/

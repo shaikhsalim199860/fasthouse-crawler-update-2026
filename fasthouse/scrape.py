@@ -404,6 +404,30 @@ class FasthouseScraper(BaseScraper):
 
         print(f"Fetching images for ASIN via v2: {asin}")
 
+        def force_1500_square(path):
+            try:
+                if not os.path.exists(path):
+                    return
+
+                img = Image.open(path).convert("RGB")
+                w, h = img.size
+
+                # center crop
+                min_dim = min(w, h)
+                left = (w - min_dim) // 2
+                top = (h - min_dim) // 2
+                right = left + min_dim
+                bottom = top + min_dim
+                img = img.crop((left, top, right, bottom))
+
+                # resize
+                img = img.resize((1500, 1500), Image.LANCZOS)
+
+                img.save(path, "JPEG", quality=95, subsampling=0)
+
+            except Exception as e:
+                print(f"[WARN] Resize failed for {path}: {e}")
+
         thumbnails = self.soup.select(".product__thumbnail")
         image_urls = []
 
@@ -417,24 +441,25 @@ class FasthouseScraper(BaseScraper):
                 meta = self._get_image_metadata(asin=asin, index=index)
                 img_name, image_url_col_name = meta["img_name"], meta["image_url_col_name"]
 
-                # ---- SAFE IMAGE EXTRACTION ----
                 try:
                     if not thumbnail or not thumbnail.img or not thumbnail.img.get("src"):
                         print(f"[WARN] Missing thumbnail image for {asin} index {index}")
                         continue
 
                     thumbnail_url: str = thumbnail.img["src"]
-                    url = f"https:{thumbnail_url.replace('140x140', '1200x')}"
+                    url = f"https:{thumbnail_url.replace('140x140', '1500x')}"
 
                     image_urls.append({image_url_col_name: url})
                     self._image_download_and_save(url=url, img_name=img_name, folderize=folderize)
+
+                    # ---- RESIZE AFTER DOWNLOAD ----
+                    force_1500_square(f"{self.assets_folder}/{img_name}")
 
                 except Exception as e:
                     print(f"[ERROR] Thumbnail failed for {asin} index {index}: {e}")
                     continue
 
         else:
-            # Only a single image exists
             img_name = f"{asin}.main.jpg"
             image_url_col_name = "main"
 
@@ -446,10 +471,13 @@ class FasthouseScraper(BaseScraper):
                     image_urls.append({"main_image_missing": True})
                 else:
                     url = f"https:{container.img['src']}"
-                    url = url.replace("300x", "1200x")
+                    url = url.replace("300x", "1500x")
 
                     image_urls.append({image_url_col_name: url})
                     self._image_download_and_save(url=url, img_name=img_name, folderize=folderize)
+
+                    # ---- RESIZE AFTER DOWNLOAD ----
+                    force_1500_square(f"{self.assets_folder}/{img_name}")
 
             except Exception as e:
                 print(f"[ERROR] Main image extraction failed for {asin}: {e}")
