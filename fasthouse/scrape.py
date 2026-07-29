@@ -1,6 +1,8 @@
 import os
 import copy
 import enum
+import html as html_lib
+import json
 import unicodedata
 from typing import Optional
 from typing import Tuple, Text, Union
@@ -12,9 +14,8 @@ from bs4 import BeautifulSoup
 import pandas as pd
 from PIL import Image
 # -*- coding: cp1252 -*-
-############################
-# How can I change this code such that image download or scraping is a pluggable component?
-############################
+
+print("[scrape.py] VERSION 6 loaded (lxml + raw-regex + JSON fallback)")
 
 
 class BaseScraper:
@@ -35,25 +36,42 @@ class BaseScraper:
             raise ValueError("Given path does not exist")
 
         return pd.read_csv(fpath)
-        
+
     @backoff.on_exception(
         backoff.expo,
         requests.exceptions.RequestException,
         max_tries=5,
-    ) 
+    )
     def _get_page_source(self, url: str) -> Optional[bytes]:
-        resp = requests.get(url)
+        resp = requests.get(url, headers={
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
+            ),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+        })
         resp.raise_for_status()
         return resp.content
+    
 
     def make_soup_obj(self, url: str) -> Optional[BeautifulSoup]:
+        self.current_url = url
         try:
             if url:
                 content = self._get_page_source(url)
-                self.soup = BeautifulSoup(content, "html.parser")
+                self.page_html = content.decode("utf-8", errors="ignore")
+                try:
+                    # lxml handles malformed real-world pages much better;
+                    # falls back to the builtin parser if not installed.
+                    self.soup = BeautifulSoup(content, "lxml")
+                except Exception:
+                    self.soup = BeautifulSoup(content, "html.parser")
             else:
                 return None
-        except requests.exceptions.RequestException:
+        except requests.exceptions.RequestException as e:
+                status = getattr(getattr(e, "response", None), "status_code", "?")
+                print(f"[ERROR] Page fetch FAILED (status {status}) for {url}: {e}")
                 return None
 
         if not content:
@@ -65,6 +83,20 @@ class BaseScraper:
 
 
 class FasthouseScraper(BaseScraper):
+    # ------------------------------------------------------------------
+    # SELECTOR UPDATE (2026 theme), confirmed from the live page HTML:
+    # - Description lives in: <div class="pdp-short-description">
+    #     <div class="metafield-rich_text_field"><p>...</p></div></div>
+    # - Features are in: <details class="fw-accordion"><summary>Features
+    #   </summary><div class="fw-accordion-content">... with the bullets
+    #   as ONE <p> separated by <br>, each line prefixed with "- "
+    #   (no <ul> anymore).
+    # - Materials / Returns and Exchanges are sibling fw-accordion blocks
+    #   and must not be picked up.
+    # .rte is kept last in the chain for any old-format pages.
+    # ------------------------------------------------------------------
+    description_identifier = ".pdp-short-description, .product__description, .rte"
+
     def __init__(self, min_img_size: Tuple[int, int] = (550, 550)) -> None:
         super().__init__()
         self.min_img_size = min_img_size
@@ -81,8 +113,15 @@ class FasthouseScraper(BaseScraper):
         if price:
             return self.clean_string(price.get_text()).replace("$","")
         else:
-            price= self.soup.find("span", class_="price").get_text().replace("Sale price","")
-            return self.clean_string(price).replace("$","")
+            price= self.soup.find("span", class_="price")
+            if price:
+                price = price.get_text().replace("Sale price","")
+                return self.clean_string(price).replace("$","")
+            # New theme fallback: Shopify always renders this meta tag.
+            meta = self.soup.find("meta", attrs={"property": "product:price:amount"})
+            if meta and meta.get("content"):
+                return self.clean_string(meta["content"])
+            return ""
 
     def get_title_v2(self):
         # We have to override this, as fasthouse has changed their title strategy.
@@ -90,10 +129,150 @@ class FasthouseScraper(BaseScraper):
 
     def matchWord(self,q):
             return re.compile(r'\b({0})\b'.format(q), flags=re.IGNORECASE).search
-    
+
+    def _find_features_bullets(self) -> list:
+        """Return the Features bullets as a list of clean strings.
+
+        New format: <details class="fw-accordion"><summary>Features</summary>
+        with the bullets as <br>-separated "- " lines inside
+        .fw-accordion-content. Handles a real <ul> too if a product has one.
+        Falls back to a <ul> inside the description container (old format).
+        """
+        # --- New format: Features accordion ---
+        for summary in self.soup.find_all("summary"):
+            if re.match(r"^\s*Features\s*:?\s*$", summary.get_text()):
+                details = summary.find_parent("details") or summary.parent
+                content = details.select_one(".fw-accordion-content") or details
+                content = copy.copy(content)
+                for br in content.find_all("br"):
+                    br.replace_with("\n")
+
+                ul = content.find("ul")
+                if ul:
+                    return [
+                        li.get_text(" ", strip=True)
+                        for li in ul.find_all("li")
+                        if li.get_text(strip=True)
+                    ]
+
+                return [
+                    re.sub(r"^[-\u2022\u00b7*]+\s*", "", line.strip())
+                    for line in content.get_text("\n").split("\n")
+                    if line.strip() and not re.match(r"^\s*Features\s*:?\s*$", line)
+                ]
+
+        # --- Raw HTML fallback: parser-independent regex extraction ---
+        # If the parse tree got mangled (malformed markup on the real page),
+        # read the Features accordion straight from the raw page bytes.
+        raw = getattr(self, "page_html", "")
+        if raw:
+            m = re.search(
+                r"<summary[^>]*>\s*Features\s*:?\s*</summary>(.*?)</details>",
+                raw, re.S | re.I,
+            )
+            if m:
+                block = m.group(1)
+                lis = re.findall(r"<li[^>]*>(.*?)</li>", block, re.S)
+                if lis:
+                    bullets = []
+                    for li in lis:
+                        text = re.sub(r"<[^>]+>", " ", li)
+                        text = html_lib.unescape(text)
+                        text = re.sub(r"\s+", " ", text).strip()
+                        if text:
+                            bullets.append(text)
+                    if bullets:
+                        print("[INFO] Bullets extracted via raw-HTML regex")
+                        return bullets
+                # br-dash style inside the accordion, no <li>
+                text = re.sub(r"<br\s*/?>", "\n", block, flags=re.I)
+                text = re.sub(r"<[^>]+>", " ", text)
+                text = html_lib.unescape(text)
+                bullets = [
+                    re.sub(r"^[-\u2022\u00b7*]+\s*", "", line.strip())
+                    for line in text.split("\n")
+                    if line.strip()
+                ]
+                if bullets:
+                    print("[INFO] Bullets extracted via raw-HTML regex (br style)")
+                    return bullets
+
+        # --- Old format: <ul> inside the description container ---
+        desc_node = self.soup.select_one(self.description_identifier)
+        if desc_node is not None:
+            ul = desc_node.find("ul")
+            if ul:
+                return [
+                    li.get_text(" ", strip=True)
+                    for li in ul.find_all("li")
+                    if li.get_text(strip=True)
+                ]
+
+        return []
+
+
+    def _get_json_fallback(self):
+        """When the HTML page does not contain the description/Features
+        (theme renders them with JavaScript), fetch the Shopify product
+        JSON endpoint ({url}.js) and parse them from body_html instead.
+        Returns (desc_text, bullets_list); ('', []) on any failure."""
+        try:
+            base = self.current_url.split("?")[0].rstrip("/")
+            content = self._get_page_source(base + ".js")
+            payload = json.loads(content)
+        except Exception as e:
+            print(f"[WARN] JSON fallback failed for {getattr(self, 'current_url', '?')}: {e}")
+            return "", []
+
+        desc_html = payload.get("description") or ""
+        if not desc_html:
+            return "", []
+
+        dsoup = BeautifulSoup(desc_html, "html.parser")
+        for br in dsoup.find_all("br"):
+            br.replace_with("\n")
+
+        # bullets: first <ul>, else "- " lines after "Features"
+        bullets = []
+        ul = dsoup.find("ul")
+        if ul:
+            bullets = [
+                li.get_text(" ", strip=True)
+                for li in ul.find_all("li")
+                if li.get_text(strip=True)
+            ]
+
+        temp = copy.copy(dsoup)
+        for u in temp.find_all("ul"):
+            u.decompose()
+
+        # Bullets from raw text (keeps the <br>-inserted newlines intact)
+        raw_text = temp.get_text("\n")
+        if not bullets and "Features" in raw_text:
+            tail = raw_text.split("Features", 1)[1]
+            bullets = [
+                re.sub(r"^[-\u2022\u00b7*]+\s*", "", l.strip())
+                for l in tail.split("\n")
+                if l.strip()
+            ]
+
+        # Description from per-paragraph text (inline tags don't split lines)
+        paragraphs = temp.find_all("p")
+        if paragraphs:
+            lines = [re.sub(r"\s+", " ", p.get_text(" ", strip=True)) for p in paragraphs]
+            text = "\n".join([l for l in lines if l])
+        else:
+            text = raw_text
+
+        desc_text = text.split("Features")[0]
+        desc_lines = [l.strip() for l in desc_text.split("\n") if l.strip()]
+        return "\n".join(desc_lines), bullets
+
     def getRedText(self):
         list_q=['size','sizes','ordering']
-        desc = self.soup.select_one('.rte')
+        desc = self.soup.select_one(self.description_identifier)  # was: '.rte'
+        if desc is None:
+            return ''
         desc=desc.text.strip("")
         list_text=desc.split("\n")
         for text_desc in list_text:
@@ -108,17 +287,28 @@ class FasthouseScraper(BaseScraper):
             "Description": "",
             "Bullet check": 0,
         }
-        description_identifier = ".rte"  # Old: .description.content
-        bullet_character = "•"
+        description_identifier = self.description_identifier  # was: ".rte"
+        bullet_character = "\u2022"
 
         # Add the remaining bullet headers: Bullet{1} -> Bullet{n}
         result.update({f"Bullet{i + 1}": "" for i in range(max_bullets)})
 
         # Main description body
-        # Problematic cases:
-        # - "Features" word is present in the main body.
-        # - <ul> present without "features" word.
-        # - Bullets directly present.
+        # Raw-HTML fallback for the description if the parse tree missed it
+        if not self.soup.select_one(description_identifier):
+            raw = getattr(self, "page_html", "")
+            m = re.search(
+                r'class="pdp-short-description"(.*?)</div>\s*</div>',
+                raw, re.S | re.I,
+            )
+            if m:
+                text = re.sub(r"<br\s*/?>", "\n", m.group(1), flags=re.I)
+                text = re.sub(r"<[^>]+>", " ", text)
+                text = html_lib.unescape(text)
+                text = re.sub(r"[ \t]+", " ", text).strip().lstrip(">").strip()
+                if text:
+                    print("[INFO] Description extracted via raw-HTML regex")
+                    result["Description"] = text + "<BR><BR>"
 
         if self.soup.select_one(description_identifier):
             temp_description: bs4.element.Tag = copy.copy(self.soup.select_one(description_identifier))
@@ -142,8 +332,23 @@ class FasthouseScraper(BaseScraper):
                 result["Description"] = desc_text.strip().rstrip().lstrip()
 
 
-        # If the description content contains bullets
-        if self.soup.select_one(f"{description_identifier} ul"):
+        # Features bullets (new fw-accordion format, ul formats, or old .rte ul)
+        # (was: self.soup.select_one(f"{description_identifier} ul"))
+        bullets_list = self._find_features_bullets()
+
+        # JSON fallback: page HTML did not contain the content (rendered by
+        # JavaScript on the live site) -> read it from {url}.js body_html.
+        if not bullets_list:
+            json_desc, json_bullets = self._get_json_fallback()
+            if json_bullets:
+                print("[INFO] Bullets taken from product JSON endpoint")
+                bullets_list = json_bullets
+            if json_desc and not result["Description"]:
+                for junk in ["CCSizeChartLaunchLocationBefore", "CCSizeChartLaunchLocationAfter"]:
+                    json_desc = json_desc.replace(junk, "")
+                result["Description"] = json_desc.strip() + "<BR><BR>"
+
+        if bullets_list:
             start_v=1
             if self.getRedText():
                 start_v=2
@@ -151,14 +356,7 @@ class FasthouseScraper(BaseScraper):
 
             features = {
                 f"Bullet{index}": value
-                for index, value in enumerate(
-                    [
-                        val.strip()
-                        for val in self.soup.select_one(f"{description_identifier} ul").text.strip().split("\n")
-                        if val
-                    ],
-                    start=start_v,
-                )
+                for index, value in enumerate(bullets_list, start=start_v)
             }
 
 
@@ -187,7 +385,7 @@ class FasthouseScraper(BaseScraper):
 
             features = {
                 f"Bullet{index}": value
-                for index, value in enumerate([b.strip().lstrip(bullet_character).lstrip() for b in bullets], start=start_v)
+                for index, value in enumerate([b.strip().lstrip(bullet_character).lstrip() for b in bullets if b.strip()], start=start_v)
             }
 
 
@@ -220,10 +418,6 @@ class FasthouseScraper(BaseScraper):
         # Add the remaining bullet headers: Bullet{1} -> Bullet{n}
         result.update({f"Bullet{i + 1}": "" for i in range(max_bullets)})
 
-        # ? Instead of this logic:
-        # // self.soup.select_one('.description.content').text.strip().split('\n')[0].strip() + '<BR><BR>'
-        # We can go for finding features and the using that:
-        # *
         if self.soup.select_one(".description.content"):
             result["Description"] = (
                 self.soup.select_one(".description.content").text.strip().split("\n")[0].strip() + "<BR><BR>"
@@ -492,7 +686,7 @@ class FasthouseScraper(BaseScraper):
 
         return image_urls
 
-    
+
     def get_size_chart(self, product_row: dict, folderize: bool = True) -> str:
         asin = product_row.get("ASIN") or product_row.get("Seller SKU")
         if pd.isna(asin):
@@ -533,7 +727,7 @@ class FasthouseScraper(BaseScraper):
         print("No size chart found for:", asin)
         return ""
 
-     
+
 
 class RunType(enum.Enum):
     fetch_data = "fetch_data"
@@ -555,7 +749,7 @@ def fetch_text_and_images(df: pd.DataFrame, mode: str, progress_bar: bool = Fals
 
     # Smaller sample
     # data = df.iloc[-5:, :].to_dict('records')
-    df.fillna('', inplace=True)
+    df = df.astype(object).where(df.notna(), '')
     data = df.to_dict("records")
     # Check if image download can even be carried out or not
     if mode == RunType.fetch_images.value and not any(col in df.columns for col in {"ASIN", "Seller SKU"}):
@@ -574,6 +768,7 @@ def fetch_text_and_images(df: pd.DataFrame, mode: str, progress_bar: bool = Fals
 
             resp = scraper.make_soup_obj(row["URL"])
             if resp is None:
+                print(f"[ERROR] Skipping row {index} - could not fetch {row['URL']}")
                 continue
 
             if mode == RunType.fetch_data.value:
@@ -589,7 +784,10 @@ def fetch_text_and_images(df: pd.DataFrame, mode: str, progress_bar: bool = Fals
                 )
                 # Bullets and match
                 row["Bullet match"] = row["No of bullets"] == row["Bullet check"]
-                print(row)
+                if row["Bullet check"] == 1 and not str(row.get("Bullet1", "")).strip():
+                    print(f"[WARN] Row {index}: NO description/bullets found for {row['URL']}")
+                else:
+                    print(f"[OK] Row {index}: {row['Bullet check']} bullets captured")
             # Fetch images
             if mode == RunType.fetch_images.value:
                 # Keep everything in the same folder
@@ -605,21 +803,24 @@ def fetch_text_and_images(df: pd.DataFrame, mode: str, progress_bar: bool = Fals
                     else scraper.get_images(product_row=row, folderize=False)
                 )
                 [row.update(col_url_map) for col_url_map in image_urls]
-             
-             # Fetch A+ images    
+
+             # Fetch A+ images
             if mode == RunType.A_Plus_fetch_images.value:
                     # Keep everything in the same folder
                 image_urls = (scraper.get_A_Plus_images(product_row=row, folderize=False))
-            
-                [row.update(col_url_map) for col_url_map in image_urls]
-    
-    except Exception as e:
-        st.exception(e)
 
-            
+                [row.update(col_url_map) for col_url_map in image_urls]
+
+    except Exception as e:
+        if progress_bar:
+            import streamlit as st
+            st.exception(e)
+        else:
+            raise
+
     finally:
         out = pd.DataFrame(data)
-        
+
         # Rearrange the columns to have all image name cols together
         if "Is Main Image Background White" in out.columns:
             out.insert(
@@ -629,7 +830,7 @@ def fetch_text_and_images(df: pd.DataFrame, mode: str, progress_bar: bool = Fals
             out.insert(len(out.columns) - 1, "Exceeded 9 images", out.pop("Exceeded 9 images"))
         if "Is Video Available" in out.columns:
              out.insert(len(out.columns) - 1, "Is Video Available", out.pop("Is Video Available"))
- 
+
         if mode == RunType.fetch_data.value:
             fname = "Fasthouse.csv".replace(".csv", "__data.csv")
         elif mode == RunType.fetch_images.value:
@@ -639,10 +840,10 @@ def fetch_text_and_images(df: pd.DataFrame, mode: str, progress_bar: bool = Fals
 
         out.to_csv(fname, sep=",", index=False)
 
-        return out
+    return out
 
 
 if __name__ == "__main__":
     df = pd.read_csv("./fasthouse/may.csv")
-    mode = "fetch_images"
+    mode = "fetch_data"
     fetch_text_and_images(df, mode)
