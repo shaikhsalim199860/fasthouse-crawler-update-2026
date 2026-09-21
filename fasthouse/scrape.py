@@ -22,10 +22,29 @@ from crawler_app.images import (
     to_rgb,
 )
 from crawler_app.netutil import fetch_bytes, fetch_image, make_session
-from crawler_app.runner import run_rows, streamlit_progress_callback
+from crawler_app.runner import (
+    asin_of,
+    copy_asset_files,
+    copy_scraped_columns,
+    run_rows,
+    streamlit_progress_callback,
+)
 from fasthouse.sizechart import SizeChartCache, fetch_size_charts, parse_kiwi_data
 
 log = logging.getLogger(__name__)
+
+
+def _describe_error(e: Exception) -> str:
+    """Short human-readable reason for a failed request."""
+    if isinstance(e, requests.exceptions.ReadTimeout):
+        return "read timed out"
+    if isinstance(e, requests.exceptions.ConnectTimeout):
+        return "connect timed out"
+    if isinstance(e, requests.exceptions.SSLError):
+        return "SSL error"
+    if isinstance(e, requests.exceptions.ConnectionError):
+        return "connection error / stalled after retries"
+    return type(e).__name__
 
 
 class BaseScraper:
@@ -41,6 +60,7 @@ class BaseScraper:
         self.soup: Optional[BeautifulSoup] = None
         self.page_html = ""
         self.current_url = ""
+        self.last_fetch_error = ""
 
         if not os.path.exists(self.outputs_folder):
             os.makedirs(self.outputs_folder, exist_ok=True)
@@ -67,6 +87,7 @@ class BaseScraper:
 
     def make_soup_obj(self, url: str) -> Optional[BeautifulSoup]:
         self.current_url = url
+        self.last_fetch_error = ""
         try:
             if url:
                 content = self._get_page_source(url)
@@ -80,11 +101,13 @@ class BaseScraper:
             else:
                 return None
         except requests.exceptions.RequestException as e:
-                status = getattr(getattr(e, "response", None), "status_code", "?")
-                log.error("Page fetch FAILED (status %s) for %s: %s", status, url, e)
+                status = getattr(getattr(e, "response", None), "status_code", None)
+                self.last_fetch_error = f"HTTP {status}" if status else _describe_error(e)
+                log.error("Page fetch FAILED (%s) for %s: %s", self.last_fetch_error, url, e)
                 return None
 
         if not content:
+            self.last_fetch_error = "empty response"
             return None
         return True
 
@@ -868,10 +891,13 @@ def fetch_text_and_images(
     if progress_bar and on_progress is None:
         on_progress = streamlit_progress_callback(len(data))
 
+    input_columns = list(df.columns)
+
     def process(index: int, row: dict, scraper: "FasthouseScraper") -> dict:
         resp = scraper.make_soup_obj(row["URL"])
         if resp is None:
-            return {"status": "error", "message": f"could not fetch {row['URL']}"}
+            reason = scraper.last_fetch_error or "unknown error"
+            return {"status": "error", "message": f"could not fetch ({reason}) {row['URL']}"}
 
         if mode == RunType.fetch_data.value:
             row["Title"] = scraper.get_title_v2()
@@ -932,6 +958,20 @@ def fetch_text_and_images(
 
         return {"status": "ok"}
 
+    def replicate(src: dict, dst: dict) -> dict:
+        """Apply a crawled row's result to another row with the same URL
+        (a size variant): copy the scraped columns and duplicate the files
+        under the other row's ASIN."""
+        copy_scraped_columns(src, dst, input_columns)
+        if mode == RunType.fetch_data.value:
+            dst["Bullet match"] = dst.get("No of bullets") == dst.get("Bullet check")
+            return {"message": "result copied"}
+        src_asin, dst_asin = asin_of(src), asin_of(dst)
+        copied = copy_asset_files(assets_folder, src_asin, dst_asin)
+        if mode == RunType.fetch_size_charts.value and dst.get("Size Chart File") and src_asin != dst_asin:
+            dst["Size Chart File"] = str(dst["Size Chart File"]).replace(src_asin, dst_asin)
+        return {"images": copied, "message": f"{copied} files copied"}
+
     run_rows(
         data,
         process,
@@ -939,6 +979,7 @@ def fetch_text_and_images(
         workers=workers,
         on_progress=on_progress,
         cancel_event=cancel_event,
+        replicate=replicate,
     )
 
     out = pd.DataFrame(data)

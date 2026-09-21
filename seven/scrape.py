@@ -11,7 +11,13 @@ from PIL import Image
 
 from crawler_app.images import ensure_min_size, is_background_white, to_rgb
 from crawler_app.netutil import fetch_bytes, fetch_image, make_session
-from crawler_app.runner import run_rows, streamlit_progress_callback
+from crawler_app.runner import (
+    asin_of,
+    copy_asset_files,
+    copy_scraped_columns,
+    run_rows,
+    streamlit_progress_callback,
+)
 
 log = logging.getLogger(__name__)
 
@@ -41,6 +47,7 @@ class SevenScraper:
         self.min_img_size = min_img_size
         self.session = make_session()
         self.soup: Optional[BeautifulSoup] = None
+        self.last_fetch_error = ""
 
         if not os.path.exists(self.outputs_folder):
             os.makedirs(self.outputs_folder, exist_ok=True)
@@ -54,11 +61,13 @@ class SevenScraper:
         return fetch_bytes(self.session, url)
 
     def make_soup_obj(self, url: str) -> Optional[bool]:
+        self.last_fetch_error = ""
         try:
             content = self._get_page_source(url)
         except requests.exceptions.RequestException as e:
-            status = getattr(getattr(e, "response", None), "status_code", "?")
-            log.error("Page fetch FAILED (status %s) for %s: %s", status, url, e)
+            status = getattr(getattr(e, "response", None), "status_code", None)
+            self.last_fetch_error = f"HTTP {status}" if status else type(e).__name__
+            log.error("Page fetch FAILED (%s) for %s: %s", self.last_fetch_error, url, e)
             return None
 
         self.soup = BeautifulSoup(content, "html.parser")
@@ -223,11 +232,14 @@ def start(
     if progress_bar and on_progress is None:
         on_progress = streamlit_progress_callback(len(data))
 
+    input_columns = list(df.columns)
+
     def process(index: int, row: dict, s: SevenScraper) -> dict:
         resp = s.make_soup_obj(row["URL"])
 
         if resp is None:
-            return {"status": "error", "message": f"could not fetch {row['URL']}"}
+            reason = s.last_fetch_error or "unknown error"
+            return {"status": "error", "message": f"could not fetch ({reason}) {row['URL']}"}
 
         if mode == RunType.fetch_data.value:
             row["Title"] = s.get_title()
@@ -257,6 +269,13 @@ def start(
 
         return {"status": "ok"}
 
+    def replicate(src: dict, dst: dict) -> dict:
+        copy_scraped_columns(src, dst, input_columns)
+        if mode == RunType.fetch_images.value:
+            copied = copy_asset_files(assets_folder, asin_of(src), asin_of(dst))
+            return {"images": copied, "message": f"{copied} files copied"}
+        return {"message": "result copied"}
+
     run_rows(
         data,
         process,
@@ -264,6 +283,7 @@ def start(
         workers=workers,
         on_progress=on_progress,
         cancel_event=cancel_event,
+        replicate=replicate,
     )
 
     out = pd.DataFrame(data)

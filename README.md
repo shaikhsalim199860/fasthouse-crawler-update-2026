@@ -10,7 +10,13 @@
 3. Press **Run scraper**. The crawl runs in a background thread on the server:
    you can refresh or close the tab and the progress/downloads are still there
    when you come back.
-4. Download the CSV and, for image modes, the ZIP part(s).
+4. Download the CSV/Excel and, for image modes, the ZIP part(s).
+
+Each product URL is fetched once: size-variant rows that share a URL get the
+result (and their own ASIN-named copies of the files) without another
+request. Rows that fail or lose an image to a transient stall are retried
+once, sequentially, after the main pass; anything still failing is listed
+in the *Failed rows* table and the `Crawl Error` / `Image Errors` columns.
 
 ## Size Charts mode (Fasthouse)
 

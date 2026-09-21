@@ -228,11 +228,13 @@ if uploaded_file is not None:
 if df is not None:
     problems, warnings = validate(df, website, crawl_type)
 
-    m1, m2, m3 = st.columns(3)
+    unique_urls = int(df["URL"].astype(str).str.strip().str.lower().nunique()) if "URL" in df.columns else len(df)
+    m1, m2, m3, m4 = st.columns(4)
     m1.metric("Rows", f"{len(df):,}")
-    m2.metric("Columns", len(df.columns))
-    est = len(df) * SECONDS_PER_ROW[crawl_type] / max(1, workers)
-    m3.metric("Estimated time", f"≈ {fmt_duration(est)}", help=f"Rough guess with {workers} worker(s).")
+    m2.metric("Unique URLs", f"{unique_urls:,}", help="Each URL is crawled once; size-variant rows sharing a URL reuse the result.")
+    m3.metric("Columns", len(df.columns))
+    est = unique_urls * SECONDS_PER_ROW[crawl_type] / max(1, workers)
+    m4.metric("Estimated time", f"≈ {fmt_duration(est)}", help=f"Rough guess with {workers} worker(s).")
 
     for p in problems:
         st.error(p)

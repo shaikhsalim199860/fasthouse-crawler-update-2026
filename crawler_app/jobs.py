@@ -103,6 +103,9 @@ class Job:
     def on_progress(self, event: Dict) -> None:
         status = event.get("status", "ok")
         sku = str(event.get("sku") or "")
+        if event.get("retry"):
+            self._on_retry(event, status, sku)
+            return
         with self.lock:
             self.done += 1
             self.current = sku
@@ -123,6 +126,30 @@ class Job:
                     "Error": msg,
                 })
                 self._log(f"ERR {sku} - {msg}")
+
+    def _on_retry(self, event: Dict, status: str, sku: str) -> None:
+        """Second attempt of a row that failed in the main pass: the row
+        was already counted, so only move it between failed/ok."""
+        with self.lock:
+            self.stage = "Retrying failed rows"
+            self.current = sku
+            index = event.get("index")
+            was_failed = any(f.get("Row") == index for f in self.failures)
+            if status == "ok":
+                if was_failed:
+                    # Rows that only had partial image failures were already
+                    # counted as ok; only fully failed rows move columns.
+                    self.failed = max(0, self.failed - 1)
+                    self.ok += 1
+                    self.images += int(event.get("images") or 0)
+                    self.failures = [f for f in self.failures if f.get("Row") != index]
+                self._log(f"RETRY OK  {sku}" + (f" - {event['message']}" if event.get("message") else ""))
+            elif status == "error":
+                msg = event.get("message") or "unknown error"
+                for f in self.failures:
+                    if f.get("Row") == index:
+                        f["Error"] = msg
+                self._log(f"RETRY ERR {sku} - {msg}")
 
 
 class JobRegistry:
