@@ -26,8 +26,11 @@ MODE_BY_CRAWL_TYPE = {
     "Data": "fetch_data",
     "Images": "fetch_images",
     "A+ Images": "A_Plus_fetch_images",
+    "Size Charts": "fetch_size_charts",
 }
-IMAGE_CRAWL_TYPES = {"Images", "A+ Images"}
+# Crawl types whose output is a folder of files delivered as ZIP parts.
+IMAGE_CRAWL_TYPES = {"Images", "A+ Images", "Size Charts"}
+CSV_SUFFIX = {"Data": "data", "Images": "images", "A+ Images": "images", "Size Charts": "sizecharts"}
 
 ACTIVE_STATUSES = {"queued", "running", "packaging"}
 
@@ -54,7 +57,9 @@ class Job:
     failures: List[dict] = field(default_factory=list)
     result_df: Optional[pd.DataFrame] = None
     csv_path: Optional[Path] = None
+    xlsx_path: Optional[Path] = None
     zip_parts: List[Path] = field(default_factory=list)
+    options: Dict = field(default_factory=dict)
     cancel_event: threading.Event = field(default_factory=threading.Event)
     lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -143,6 +148,7 @@ class JobRegistry:
         outputs_dir: Path,
         downloads_dir: Path,
         part_bytes: int = DEFAULT_PART_BYTES,
+        options: Optional[Dict] = None,
     ) -> Job:
         with self._lock:
             if self.current is not None and self.current.is_active:
@@ -153,6 +159,7 @@ class JobRegistry:
                 crawl_type=crawl_type,
                 total=len(df),
                 workers=workers,
+                options=dict(options or {}),
             )
             self.current = job
 
@@ -218,6 +225,7 @@ def _run_job(
             workers=job.workers,
             assets_folder=str(assets_dir),
             output_dir=None,
+            **job.options,
         )
 
         # Drop the "Crawl Error" column when nothing failed to keep the
@@ -226,18 +234,26 @@ def _run_job(
             out = out.drop(columns=["Crawl Error"])
         job.result_df = out
 
-        job.stage = "Writing CSV"
-        suffix = "data" if job.crawl_type == "Data" else "images"
+        job.stage = "Writing CSV / Excel"
+        suffix = CSV_SUFFIX.get(job.crawl_type, "images")
         csv_name = f"{job.website}__{suffix}.csv"
         csv_path = outputs_dir / csv_name
         out.to_csv(csv_path, index=False, encoding="utf-8-sig")
         job.csv_path = csv_path
+        try:
+            xlsx_path = outputs_dir / f"{job.website}__{suffix}.xlsx"
+            out.to_excel(xlsx_path, index=False)
+            job.xlsx_path = xlsx_path
+        except Exception as e:  # noqa: BLE001 - Excel is a convenience copy
+            log.warning("Excel export skipped: %s", e)
 
         if job.is_image_job:
             job.status = "packaging"
             job.stage = "Packaging images into ZIP"
             job._log("Crawl finished - packaging images...")
             shutil.copyfile(csv_path, assets_dir / csv_name)
+            if job.xlsx_path:
+                shutil.copyfile(job.xlsx_path, assets_dir / job.xlsx_path.name)
             job.zip_parts = build_zip_parts(
                 assets_dir, downloads_dir, f"{job.website}_{job.id}", max_part_bytes=part_bytes
             )

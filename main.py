@@ -11,6 +11,7 @@ from crawler_app.archive import MB
 from crawler_app.jobs import IMAGE_CRAWL_TYPES, REGISTRY, Job
 from crawler_app.runner import MAX_WORKERS
 from fasthouse.scrape import fetch_text_and_images
+from fasthouse.sizechart import UNIT_CHOICES
 from seven.scrape import start as seven_start
 
 # -----------------------
@@ -30,7 +31,7 @@ STATIC_SERVING = bool(st.get_option("server.enableStaticServing"))
 CRAWLERS = {"Fasthouse": fetch_text_and_images, "Seven": seven_start}
 
 # Rough per-row cost used only for the "estimated time" hint.
-SECONDS_PER_ROW = {"Data": 2.0, "Images": 7.0, "A+ Images": 5.0}
+SECONDS_PER_ROW = {"Data": 2.0, "Images": 7.0, "A+ Images": 5.0, "Size Charts": 2.0}
 
 if not logging.getLogger().handlers:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -132,8 +133,18 @@ with st.sidebar:
 
     crawl_options = ["Data", "Images"]
     if website == "Fasthouse":
-        crawl_options.append("A+ Images")
+        crawl_options += ["A+ Images", "Size Charts"]
     crawl_type = st.radio("Crawling type", crawl_options)
+
+    units = "Inches"
+    if crawl_type == "Size Charts":
+        units = st.radio(
+            "Size chart units",
+            UNIT_CHOICES,
+            horizontal=True,
+            help="Which measurement table(s) to put in the 2000x2000 PNG. "
+                 "'Both' stacks an inches table and a centimetres table.",
+        )
 
     with st.expander("Advanced", expanded=False):
         workers = st.slider(
@@ -165,6 +176,17 @@ with st.sidebar:
 
 **Optional**
 - `ASIN` - used to name image files in the image modes
+            """
+        )
+    with st.expander("About Size Charts mode", expanded=False):
+        st.markdown(
+            """
+Reads each product's **Kiwi Sizing** chart (the "What's My Size?" pop-up)
+and renders it to a **2000 x 2000 PNG** named `ASIN.SIZE-CHART.png`:
+heading, measurement diagram, *How to Measure* as one step-by-step
+sentence, and the measurement table. Products that share a chart are
+rendered once. The CSV/Excel lists the status, chart name, sizes and
+diagram URL per row.
             """
         )
     if not STATIC_SERVING:
@@ -256,6 +278,7 @@ if run_clicked and df is not None:
             outputs_dir=OUTPUTS_DIR,
             downloads_dir=DOWNLOADS_DIR,
             part_bytes=part_mb * MB,
+            options={"units": units} if crawl_type == "Size Charts" else {},
         )
         st.rerun()
     except RuntimeError as e:
@@ -354,6 +377,13 @@ if out is not None:
         mismatch = int((out["Bullet match"] == False).sum())  # noqa: E712
         if mismatch:
             flags.append(f"{mismatch} row(s) where the captured bullet count differs from 'No of bullets'")
+    if "Size Chart Status" in out.columns:
+        missing = int(out["Size Chart Status"].astype(str).str.startswith("No size chart").sum())
+        if missing:
+            flags.append(f"{missing} product(s) have no size chart on the website (see 'Size Chart Status')")
+        multi = int((pd.to_numeric(out.get("Size Chart Count"), errors="coerce").fillna(0) > 1).sum())
+        if multi:
+            flags.append(f"{multi} product(s) have more than one size chart (saved as ASIN.SIZE-CHART-2.png, ...)")
     for f in flags:
         st.warning(f)
 
@@ -386,11 +416,20 @@ if job.csv_path and job.csv_path.exists():
         on_click="ignore",
         width="stretch",
     )
+if job.xlsx_path and job.xlsx_path.exists():
+    dl_cols[1].download_button(
+        "⬇ Download Excel",
+        data=job.xlsx_path.read_bytes(),
+        file_name=job.xlsx_path.name,
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        on_click="ignore",
+        width="stretch",
+    )
 
 if job.is_image_job:
     parts = [p for p in job.zip_parts if p.exists()]
     if not parts:
-        st.info("No images were downloaded, so there is no ZIP to offer.")
+        st.info("No files were produced, so there is no ZIP to offer.")
     else:
         total_bytes = sum(p.stat().st_size for p in parts)
         if len(parts) > 1:

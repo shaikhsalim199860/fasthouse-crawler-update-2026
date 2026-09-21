@@ -23,6 +23,7 @@ from crawler_app.images import (
 )
 from crawler_app.netutil import fetch_bytes, fetch_image, make_session
 from crawler_app.runner import run_rows, streamlit_progress_callback
+from fasthouse.sizechart import SizeChartCache, fetch_size_charts, parse_kiwi_data
 
 log = logging.getLogger(__name__)
 
@@ -700,6 +701,76 @@ class FasthouseScraper(BaseScraper):
         return image_urls
 
 
+    def get_fit_guide_url(self) -> str:
+        """URL of the theme's 'Fit' accordion graphic (fit style bars), if any."""
+        img = self.soup.find("img", alt=re.compile(r"fit guide", re.I))
+        if img is None:
+            fit_div = self.soup.find("div", class_="fit_guide_pc")
+            img = fit_div.find("img") if fit_div else None
+        if img is None or not img.get("src"):
+            return ""
+        src = img["src"]
+        return src if src.startswith("http") else f"https:{src}"
+
+    def get_size_charts_v2(self, product_row: dict, units: str, cache: SizeChartCache, folderize: bool = False) -> dict:
+        """Render every Kiwi Sizing chart for the product to 2000x2000 PNGs
+        named `{ASIN}.SIZE-CHART.png` (`.SIZE-CHART-2.png`, ... for extra
+        charts such as bikini top/bottom). Returns the output columns."""
+        asin = product_row.get("ASIN")
+        if asin is None or pd.isna(asin) or not str(asin).strip():
+            asin = product_row["Seller SKU"]
+
+        result = {
+            "Size Chart Status": "",
+            "Size Chart Name": "",
+            "Size Chart File": "",
+            "Size Chart Sizes": "",
+            "Size Chart Measurements": "",
+            "How to Measure": "",
+            "Size Chart Diagram URL": "",
+            "Fit Guide URL": self.get_fit_guide_url(),
+            "Size Chart Count": 0,
+        }
+
+        kiwi = parse_kiwi_data(self.page_html)
+        if not kiwi:
+            result["Size Chart Status"] = "No size chart (page has no Kiwi Sizing data)"
+            return result
+
+        charts = fetch_size_charts(self.session, kiwi)
+        if not charts:
+            result["Size Chart Status"] = "No size chart"
+            return result
+
+        files, names, sizes, meas, htm, diagrams = [], [], [], [], [], []
+        for index, chart in enumerate(charts):
+            suffix = "" if index == 0 else f"-{index + 1}"
+            img_name = f"{asin}.SIZE-CHART{suffix}.png"
+            png = cache.png(self.session, chart, units)
+            path = self._image_path(img_name, folderize)
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            with open(path, "wb") as fh:
+                fh.write(png)
+            files.append(img_name)
+            names.append(chart.name)
+            sizes.append(", ".join(chart.sizes))
+            meas.append(", ".join(chart.measurements))
+            htm.append(chart.how_to_measure_sentence)
+            if chart.diagram_url:
+                diagrams.append(chart.diagram_url)
+
+        result.update({
+            "Size Chart Status": "Found",
+            "Size Chart Name": " | ".join(names),
+            "Size Chart File": " | ".join(files),
+            "Size Chart Sizes": " | ".join(sizes),
+            "Size Chart Measurements": " | ".join(meas),
+            "How to Measure": " | ".join(h for h in htm if h),
+            "Size Chart Diagram URL": " | ".join(diagrams),
+            "Size Chart Count": len(charts),
+        })
+        return result
+
     def get_size_chart(self, product_row: dict, folderize: bool = True) -> str:
         asin = product_row.get("ASIN") or product_row.get("Seller SKU")
         if pd.isna(asin):
@@ -746,6 +817,7 @@ class RunType(enum.Enum):
     fetch_data = "fetch_data"
     fetch_images = "fetch_images"
     A_Plus_fetch_images="A_Plus_fetch_images"
+    fetch_size_charts = "fetch_size_charts"
 
 
 def _max_bullets(df: pd.DataFrame) -> int:
@@ -766,15 +838,17 @@ def fetch_text_and_images(
     workers: int = 1,
     assets_folder: str = "./assets",
     output_dir: Optional[str] = "./outputs",
+    units: str = "Inches",
 ):
     """Crawl every row of `df` in `mode` (fetch_data / fetch_images /
-    A_Plus_fetch_images) and return the enriched DataFrame.
+    A_Plus_fetch_images / fetch_size_charts) and return the enriched DataFrame.
 
     on_progress   optional callback receiving one event dict per row
     cancel_event  optional threading.Event; remaining rows are skipped once set
     workers       parallel worker threads (each with its own scraper/session)
     output_dir    where the legacy Fasthouse__*.csv is written; None to skip
     progress_bar  legacy flag: draw an st.progress bar (Streamlit thread only)
+    units         size-chart mode only: "Inches", "Centimetres" or "Both"
     """
     website_format = "new"  # Allowed values are old and new.
 
@@ -788,6 +862,8 @@ def fetch_text_and_images(
         raise ValueError("ASIN name required for image download to start.")
 
     max_bullets = _max_bullets(df) if mode == RunType.fetch_data.value else 0
+    # Shared across worker threads: one render per distinct chart.
+    chart_cache = SizeChartCache()
 
     if progress_bar and on_progress is None:
         on_progress = streamlit_progress_callback(len(data))
@@ -839,6 +915,14 @@ def fetch_text_and_images(
                 note = f"{n_images} images"
             return {"status": "ok", "images": n_images, "message": note}
 
+        # Size charts (Kiwi Sizing -> rendered PNG)
+        if mode == RunType.fetch_size_charts.value:
+            info = scraper.get_size_charts_v2(product_row=row, units=units, cache=chart_cache, folderize=False)
+            row.update(info)
+            n = int(info.get("Size Chart Count") or 0)
+            note = info["Size Chart Status"] if n == 0 else (f"{n} size charts" if n > 1 else info["Size Chart Name"])
+            return {"status": "ok", "images": n, "message": note}
+
         # Fetch A+ images
         if mode == RunType.A_Plus_fetch_images.value:
             image_urls = scraper.get_A_Plus_images(product_row=row, folderize=False)
@@ -858,6 +942,8 @@ def fetch_text_and_images(
     )
 
     out = pd.DataFrame(data)
+    if "Size Chart Count" in out.columns:
+        out["Size Chart Count"] = pd.to_numeric(out["Size Chart Count"], errors="coerce").fillna(0).astype(int)
 
     # Rearrange the columns to have all image name cols together
     for col in ("Is Main Image Background White", "Exceeded 9 images", "Is Video Available", "Image Errors", "Crawl Error"):
@@ -866,7 +952,10 @@ def fetch_text_and_images(
 
     if output_dir:
         os.makedirs(output_dir, exist_ok=True)
-        suffix = "__data.csv" if mode == RunType.fetch_data.value else "__images.csv"
+        suffix = {
+            RunType.fetch_data.value: "__data.csv",
+            RunType.fetch_size_charts.value: "__sizecharts.csv",
+        }.get(mode, "__images.csv")
         out.to_csv(os.path.join(output_dir, "Fasthouse" + suffix), sep=",", index=False)
 
     return out

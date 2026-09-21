@@ -4,13 +4,28 @@
 
 ## Usage
 
-1. Pick the website and crawl type in the sidebar (Data / Images / A+ Images).
+1. Pick the website and crawl type in the sidebar (Data / Images / A+ Images / Size Charts).
 2. Upload a CSV with `Seller SKU`, `URL` and (Fasthouse Data mode only) `No of bullets`.
    An optional `ASIN` column is used to name image files.
 3. Press **Run scraper**. The crawl runs in a background thread on the server:
    you can refresh or close the tab and the progress/downloads are still there
    when you come back.
 4. Download the CSV and, for image modes, the ZIP part(s).
+
+## Size Charts mode (Fasthouse)
+
+Fasthouse's size charts come from the Kiwi Sizing app and are injected by
+JavaScript, so they are not in the page HTML. The crawler reads the
+`KiwiSizing.data` block from each product page, calls Kiwi's
+`getSizingChart` API and renders the result with Pillow to a
+**2000 x 2000 PNG** named `ASIN.SIZE-CHART.png` (`-2`, `-3` for products
+with several charts, e.g. bikini top/bottom): heading, measurement diagram,
+"How to Measure" as one step-by-step sentence, the table in inches, cm or
+both, and the footer note. Charts shared by many products are rendered once.
+The CSV/Excel output records the status per row (Found / No size chart),
+chart name, sizes, measurements, the How-to-Measure sentence, the diagram
+URL and the theme's fit-guide image URL. Fonts: bundled Inter (OFL) in
+`crawler_app/fonts/`.
 
 ## Layout
 
@@ -22,6 +37,7 @@
 | `crawler_app/archive.py` | Splits `assets/` into ZIP parts of bounded size (JPEGs stored, CSV deflated) |
 | `crawler_app/netutil.py` / `images.py` | Pooled HTTP session with timeouts + retries; image helpers |
 | `fasthouse/scrape.py`, `seven/scrape.py` | Site-specific parsing |
+| `fasthouse/sizechart.py` | Kiwi Sizing extraction + 2000x2000 size chart renderer |
 
 ## Why the split ZIPs / static serving
 

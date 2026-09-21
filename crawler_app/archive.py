@@ -32,7 +32,7 @@ def build_zip_parts(
 
     files = sorted(p for p in src_dir.rglob("*") if p.is_file())
     # Small companion files (the image CSV) go first so they land in part 1.
-    files.sort(key=lambda p: (p.suffix.lower() not in {".csv", ".txt"}, p.name))
+    files.sort(key=lambda p: (p.suffix.lower() not in {".csv", ".xlsx", ".txt"}, p.name))
 
     # First pass: decide the grouping so the part count is known up front.
     groups: List[List[Path]] = []
@@ -57,7 +57,7 @@ def build_zip_parts(
         path = out_dir / name
         with zipfile.ZipFile(path, "w", allowZip64=True) as zf:
             for f in group:
-                compress = zipfile.ZIP_DEFLATED if f.suffix.lower() in {".csv", ".txt"} else zipfile.ZIP_STORED
+                compress = zipfile.ZIP_DEFLATED if f.suffix.lower() in {".csv", ".xlsx", ".txt"} else zipfile.ZIP_STORED
                 zf.write(f, arcname=str(f.relative_to(src_dir)), compress_type=compress)
         parts.append(path)
         log.info("Wrote %s (%d files, %.1f MB)", path.name, len(group), path.stat().st_size / MB)
