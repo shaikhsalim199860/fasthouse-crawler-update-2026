@@ -1,0 +1,12 @@
+[server]
+# Serves ./static/** at <app>/app/static/** straight from disk, so finished
+# image archives are downloaded without being loaded into RAM.
+enableStaticServing = true
+maxUploadSize = 50
+
+[browser]
+gatherUsageStats = false
+
+[theme]
+base = "light"
+primaryColor = "#E4002B"

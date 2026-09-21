@@ -3,6 +3,9 @@ __pycache__/
 .env
 assets/
 outputs/
+static/downloads/*
+!static/downloads/.gitkeep
 *.csv
+*.zip
 *.log
 .vscode/

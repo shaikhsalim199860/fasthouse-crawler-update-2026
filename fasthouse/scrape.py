@@ -3,19 +3,28 @@ import copy
 import enum
 import html as html_lib
 import json
+import logging
 import unicodedata
 from typing import Optional
 from typing import Tuple, Text, Union
-import backoff
 import requests
 import bs4
 import re
 from bs4 import BeautifulSoup
 import pandas as pd
 from PIL import Image
-# -*- coding: cp1252 -*-
 
-print("[scrape.py] VERSION 6 loaded (lxml + raw-regex + JSON fallback)")
+from crawler_app.images import (
+    center_square,
+    ensure_min_size,
+    is_background_white,
+    save_jpeg,
+    to_rgb,
+)
+from crawler_app.netutil import fetch_bytes, fetch_image, make_session
+from crawler_app.runner import run_rows, streamlit_progress_callback
+
+log = logging.getLogger(__name__)
 
 
 class BaseScraper:
@@ -25,11 +34,23 @@ class BaseScraper:
     def __init__(self, outputs_folder: str = "./outputs", assets_folder: str = "./assets") -> None:
         self.assets_folder = assets_folder
         self.outputs_folder = outputs_folder
+        # One pooled session per scraper instance (== per worker thread):
+        # keeps connections alive across the ~7 requests made per ASIN.
+        self.session = make_session()
+        self.soup: Optional[BeautifulSoup] = None
+        self.page_html = ""
+        self.current_url = ""
 
         if not os.path.exists(self.outputs_folder):
             os.makedirs(self.outputs_folder, exist_ok=True)
         if not os.path.exists(self.assets_folder):
             os.makedirs(self.assets_folder, exist_ok=True)
+
+    def release(self) -> None:
+        """Drop the parsed page so its (large) tree can be garbage
+        collected before the next row."""
+        self.soup = None
+        self.page_html = ""
 
     def loader(self, fpath: str) -> pd.DataFrame:
         if not os.path.exists(fpath):
@@ -37,23 +58,11 @@ class BaseScraper:
 
         return pd.read_csv(fpath)
 
-    @backoff.on_exception(
-        backoff.expo,
-        requests.exceptions.RequestException,
-        max_tries=5,
-    )
     def _get_page_source(self, url: str) -> Optional[bytes]:
-        resp = requests.get(url, headers={
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
-            ),
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9",
-        })
-        resp.raise_for_status()
-        return resp.content
-    
+        # Retries/backoff for 429/5xx and connection errors live on the
+        # session adapter (see crawler_app.netutil.make_session).
+        return fetch_bytes(self.session, url)
+
 
     def make_soup_obj(self, url: str) -> Optional[BeautifulSoup]:
         self.current_url = url
@@ -71,7 +80,7 @@ class BaseScraper:
                 return None
         except requests.exceptions.RequestException as e:
                 status = getattr(getattr(e, "response", None), "status_code", "?")
-                print(f"[ERROR] Page fetch FAILED (status {status}) for {url}: {e}")
+                log.error("Page fetch FAILED (status %s) for %s: %s", status, url, e)
                 return None
 
         if not content:
@@ -97,8 +106,8 @@ class FasthouseScraper(BaseScraper):
     # ------------------------------------------------------------------
     description_identifier = ".pdp-short-description, .product__description, .rte"
 
-    def __init__(self, min_img_size: Tuple[int, int] = (550, 550)) -> None:
-        super().__init__()
+    def __init__(self, min_img_size: Tuple[int, int] = (550, 550), assets_folder: str = "./assets") -> None:
+        super().__init__(assets_folder=assets_folder)
         self.min_img_size = min_img_size
 
     def get_video_list(self):
@@ -182,7 +191,7 @@ class FasthouseScraper(BaseScraper):
                         if text:
                             bullets.append(text)
                     if bullets:
-                        print("[INFO] Bullets extracted via raw-HTML regex")
+                        log.info("Bullets extracted via raw-HTML regex")
                         return bullets
                 # br-dash style inside the accordion, no <li>
                 text = re.sub(r"<br\s*/?>", "\n", block, flags=re.I)
@@ -194,7 +203,7 @@ class FasthouseScraper(BaseScraper):
                     if line.strip()
                 ]
                 if bullets:
-                    print("[INFO] Bullets extracted via raw-HTML regex (br style)")
+                    log.info("Bullets extracted via raw-HTML regex (br style)")
                     return bullets
 
         # --- Old format: <ul> inside the description container ---
@@ -221,7 +230,7 @@ class FasthouseScraper(BaseScraper):
             content = self._get_page_source(base + ".js")
             payload = json.loads(content)
         except Exception as e:
-            print(f"[WARN] JSON fallback failed for {getattr(self, 'current_url', '?')}: {e}")
+            log.warning("JSON fallback failed for %s: %s", getattr(self, 'current_url', '?'), e)
             return "", []
 
         desc_html = payload.get("description") or ""
@@ -307,7 +316,7 @@ class FasthouseScraper(BaseScraper):
                 text = html_lib.unescape(text)
                 text = re.sub(r"[ \t]+", " ", text).strip().lstrip(">").strip()
                 if text:
-                    print("[INFO] Description extracted via raw-HTML regex")
+                    log.info("Description extracted via raw-HTML regex")
                     result["Description"] = text + "<BR><BR>"
 
         if self.soup.select_one(description_identifier):
@@ -341,7 +350,7 @@ class FasthouseScraper(BaseScraper):
         if not bullets_list:
             json_desc, json_bullets = self._get_json_fallback()
             if json_bullets:
-                print("[INFO] Bullets taken from product JSON endpoint")
+                log.info("Bullets taken from product JSON endpoint")
                 bullets_list = json_bullets
             if json_desc and not result["Description"]:
                 for junk in ["CCSizeChartLaunchLocationBefore", "CCSizeChartLaunchLocationAfter"]:
@@ -360,7 +369,7 @@ class FasthouseScraper(BaseScraper):
             }
 
 
-            print(features)
+            log.debug("features: %s", features)
             result.update(features)
             # Also add the number of bullets captured
             result["Bullet check"] = len(features)
@@ -477,19 +486,31 @@ class FasthouseScraper(BaseScraper):
         img.save(img_path)
 
     def _image_download_and_save(self, url: str, img_name: str, folderize: bool) -> None:
-        img = Image.open(requests.get(url, stream=True).raw)
-
-        if img.mode != "RGB":
-            img = img.convert("RGB")
-
-        if any(sz <= 500 for sz in img.size):
-            img = img.resize(self.min_img_size).convert("RGB")
+        img = to_rgb(fetch_image(self.session, url))
+        img = ensure_min_size(img, self.min_img_size)
 
         (
             self._write_images_sep_folders(img_name=img_name, img=img)
             if folderize
             else self._write_images_same_folder(img_name=img_name, img=img)
         )
+
+    def _image_path(self, img_name: str, folderize: bool) -> str:
+        if folderize:
+            return f"{self.assets_folder}/{img_name.split('.')[0].strip()}/{img_name}"
+        return f"{self.assets_folder}/{img_name}"
+
+    def _download_square_1500(self, url: str, img_name: str, folderize: bool) -> Image.Image:
+        """Download -> RGB -> centre-crop -> 1500x1500 -> save, in ONE pass.
+
+        The old flow saved the raw download, re-opened it from disk,
+        cropped/resized and saved again (double decode + double write per
+        image). Returns the in-memory image so callers can run the
+        background check without touching disk again.
+        """
+        img = center_square(to_rgb(fetch_image(self.session, url)))
+        save_jpeg(img, self._image_path(img_name, folderize), quality=95, subsampling=0)
+        return img
 
     @staticmethod
     def _get_a_plus_image_metadata(url: str,index : str) -> dict:
@@ -505,11 +526,21 @@ class FasthouseScraper(BaseScraper):
 
         return {"img_name": img_name, "image_url_col_name": image_url_col_name}
 
+    @staticmethod
+    def _hi_res_url(src: str) -> str:
+        """Turn a thumbnail src into the 1500px rendition.
+
+        Old theme: `.../file_140x140.jpg` -> `.../file_1500x.jpg`.
+        New theme: `.../file.jpg?v=1&width=1200` -> `...&width=1500`
+        (Shopify never upscales, so this is a no-op for small originals).
+        """
+        url = src if src.startswith("http") else f"https:{src}"
+        url = url.replace("140x140", "1500x")
+        return re.sub(r"([?&])width=\d+", r"\g<1>width=1500", url)
+
 
     def _a_plus_image_download_and_save(self, url: str, img_name: str, folderize: bool) -> None:
-        img = Image.open(requests.get(url, stream=True).raw)
-        if img.mode != "RGB":
-            img = img.convert("RGB")
+        img = to_rgb(fetch_image(self.session, url))
 
         (
             self._write_images_sep_folders(img_name=img_name, img=img)
@@ -520,7 +551,7 @@ class FasthouseScraper(BaseScraper):
     def get_A_Plus_images(self,product_row: dict, folderize: bool = True) -> list:
         image_urls = []
         url=product_row['URL']
-        print(f"Fetching A Plus Images:")
+        log.info("Fetching A Plus Images for %s", url)
         # Handling normal images
         imageLayout=self.soup.find("div",id="shopify-section-product")
         if imageLayout:
@@ -528,27 +559,33 @@ class FasthouseScraper(BaseScraper):
                 img_t = img.find('img')
                 image_url=img_t['src']
                 if image_url:
-                    print(image_url)
                     meta = self._get_a_plus_image_metadata(url,""+str(index+1))
-                    print(meta)
+                    log.debug("A+ image %s -> %s", image_url, meta)
                     img_name, image_url_col_name = meta["img_name"], meta["image_url_col_name"]
                     image_urls.append({image_url_col_name: img_name})
                     # Read the content, resize if necessary and send the img itself to be saved.
-                    self._a_plus_image_download_and_save(url=image_url, img_name=img_name, folderize=folderize)
+                    try:
+                        self._a_plus_image_download_and_save(url=image_url, img_name=img_name, folderize=folderize)
+                    except Exception as e:  # noqa: BLE001 - keep the other A+ images
+                        log.error("A+ image failed for %s: %s", image_url, e)
+                        image_urls.append({f"{image_url_col_name}_error": str(e)})
                 else:
-                    print("image url not found")
+                    log.warning("A+ image url not found")
         else:
             for index, img in enumerate(self.soup.findAll('img',class_='slideshow__image')):
                 image_url=img['src']
                 image_url="https:"+image_url
                 if image_url:
-                    print(image_url)
                     meta = self._get_a_plus_image_metadata(url,""+str(index+1))
-                    print(meta)
+                    log.debug("A+ image %s -> %s", image_url, meta)
                     img_name, image_url_col_name = meta["img_name"], meta["image_url_col_name"]
                     image_urls.append({image_url_col_name: img_name})
                     # Read the content, resize if necessary and send the img itself to be saved.
-                    self._a_plus_image_download_and_save(url=image_url, img_name=img_name, folderize=folderize)
+                    try:
+                        self._a_plus_image_download_and_save(url=image_url, img_name=img_name, folderize=folderize)
+                    except Exception as e:  # noqa: BLE001 - keep the other A+ images
+                        log.error("A+ image failed for %s: %s", image_url, e)
+                        image_urls.append({f"{image_url_col_name}_error": str(e)})
 
         return image_urls
 
@@ -564,7 +601,7 @@ class FasthouseScraper(BaseScraper):
             asin = product_row["Seller SKU"]
 
         image_urls = []
-        print(f"Fetching images for ASIN: {asin}")
+        log.info("Fetching images for ASIN: %s", asin)
         # Handling normal images
         for index, img in enumerate(
             self.soup.select(".product-gallery.product-gallery--bottom-thumbnails img.lazyload--fade-in")
@@ -582,48 +619,20 @@ class FasthouseScraper(BaseScraper):
             return image_urls
 
     def is_prominent_bg_col_white(self, img_path: str) -> dict:
-        from PIL import Image
-
-        im = Image.open(img_path)
-        prominent_color = max(im.getcolors(im.size[0] * im.size[1]))[1]
-        if prominent_color == (255, 255, 255):
-            return {"Is Main Image Background White": True}
-
-        return {"Is Main Image Background White": False}
+        with Image.open(img_path) as im:
+            return {"Is Main Image Background White": is_background_white(im)}
 
     def get_images_v2(self, product_row: dict, folderize: bool = True) -> list:
         asin = product_row.get("ASIN")
-        if pd.isna(asin):
+        if pd.isna(asin) or not str(asin).strip():
             asin = product_row["Seller SKU"]
 
-        print(f"Fetching images for ASIN via v2: {asin}")
-
-        def force_1500_square(path):
-            try:
-                if not os.path.exists(path):
-                    return
-
-                img = Image.open(path).convert("RGB")
-                w, h = img.size
-
-                # center crop
-                min_dim = min(w, h)
-                left = (w - min_dim) // 2
-                top = (h - min_dim) // 2
-                right = left + min_dim
-                bottom = top + min_dim
-                img = img.crop((left, top, right, bottom))
-
-                # resize
-                img = img.resize((1500, 1500), Image.LANCZOS)
-
-                img.save(path, "JPEG", quality=95, subsampling=0)
-
-            except Exception as e:
-                print(f"[WARN] Resize failed for {path}: {e}")
+        log.info("Fetching images for ASIN via v2: %s", asin)
 
         thumbnails = self.soup.select(".product__thumbnail")
         image_urls = []
+        main_image: Optional[Image.Image] = None
+        failed_images = []
 
         if thumbnails:
             for index, thumbnail in enumerate(thumbnails):
@@ -637,20 +646,19 @@ class FasthouseScraper(BaseScraper):
 
                 try:
                     if not thumbnail or not thumbnail.img or not thumbnail.img.get("src"):
-                        print(f"[WARN] Missing thumbnail image for {asin} index {index}")
+                        log.warning("Missing thumbnail image for %s index %s", asin, index)
                         continue
 
-                    thumbnail_url: str = thumbnail.img["src"]
-                    url = f"https:{thumbnail_url.replace('140x140', '1500x')}"
+                    url = self._hi_res_url(thumbnail.img["src"])
 
                     image_urls.append({image_url_col_name: url})
-                    self._image_download_and_save(url=url, img_name=img_name, folderize=folderize)
-
-                    # ---- RESIZE AFTER DOWNLOAD ----
-                    force_1500_square(f"{self.assets_folder}/{img_name}")
+                    img = self._download_square_1500(url=url, img_name=img_name, folderize=folderize)
+                    if index == 0:
+                        main_image = img
 
                 except Exception as e:
-                    print(f"[ERROR] Thumbnail failed for {asin} index {index}: {e}")
+                    log.error("Thumbnail failed for %s index %s: %s", asin, index, e)
+                    failed_images.append(image_url_col_name)
                     continue
 
         else:
@@ -661,27 +669,32 @@ class FasthouseScraper(BaseScraper):
                 container = self.soup.select_one('.productView-image')
 
                 if not container or not container.img or not container.img.get("src"):
-                    print(f"[ERROR] Main image not found for {asin}")
+                    log.error("Main image not found for %s", asin)
                     image_urls.append({"main_image_missing": True})
                 else:
                     url = f"https:{container.img['src']}"
                     url = url.replace("300x", "1500x")
 
                     image_urls.append({image_url_col_name: url})
-                    self._image_download_and_save(url=url, img_name=img_name, folderize=folderize)
-
-                    # ---- RESIZE AFTER DOWNLOAD ----
-                    force_1500_square(f"{self.assets_folder}/{img_name}")
+                    main_image = self._download_square_1500(url=url, img_name=img_name, folderize=folderize)
 
             except Exception as e:
-                print(f"[ERROR] Main image extraction failed for {asin}: {e}")
+                log.error("Main image extraction failed for %s: %s", asin, e)
                 image_urls.append({"main_image_error": True})
+                failed_images.append("main")
 
-        # ---- SAFE BACKGROUND CHECK ----
+        if failed_images:
+            # Surfaced in the CSV so the affected SKUs can be re-run.
+            image_urls.append({"Image Errors": ", ".join(failed_images)})
+
+        # ---- BACKGROUND CHECK (on the in-memory main image, no re-read) ----
         try:
-            image_urls.append(self.is_prominent_bg_col_white(f"{self.assets_folder}/{asin}.main.jpg"))
+            if main_image is not None:
+                image_urls.append({"Is Main Image Background White": is_background_white(main_image)})
+            else:
+                image_urls.append(self.is_prominent_bg_col_white(f"{self.assets_folder}/{asin}.main.jpg"))
         except Exception as e:
-            print(f"[WARN] Background check skipped for {asin}: {e}")
+            log.warning("Background check skipped for %s: %s", asin, e)
             image_urls.append({"bg_check_failed": True})
 
         return image_urls
@@ -692,7 +705,7 @@ class FasthouseScraper(BaseScraper):
         if pd.isna(asin):
             asin = product_row.get("Seller SKU")
 
-        print(f"Fetching images for ASIN (Size chart): {asin}")
+        log.info("Fetching size chart for ASIN: %s", asin)
 
         # --- Case 1: Old layout (collapsible-content) ---
         content_image_size = self.soup.find(
@@ -703,7 +716,7 @@ class FasthouseScraper(BaseScraper):
             img_tag = content_image_size.find("img")
             if img_tag and img_tag.get("src"):
                 content_image_size_img = f"https:{img_tag['src']}"
-                print("Found size chart (collapsible-content):", content_image_size_img)
+                log.info("Found size chart (collapsible-content): %s", content_image_size_img)
                 img_name = f"{asin}.SIZE-CHART.jpg"
                 self._image_download_and_save(
                     url=content_image_size_img, img_name=img_name, folderize=folderize
@@ -716,7 +729,7 @@ class FasthouseScraper(BaseScraper):
             img_tag = fit_guide_div.find("img")
             if img_tag and img_tag.get("src"):
                 content_image_size_img = f"https:{img_tag['src']}"
-                print("Found size chart (fit_guide_pc):", content_image_size_img)
+                log.info("Found size chart (fit_guide_pc): %s", content_image_size_img)
                 img_name = f"{asin}.SIZE-CHART.jpg"
                 self._image_download_and_save(
                     url=content_image_size_img, img_name=img_name, folderize=folderize
@@ -724,7 +737,7 @@ class FasthouseScraper(BaseScraper):
                 return content_image_size_img
 
         # No size chart found
-        print("No size chart found for:", asin)
+        log.info("No size chart found for: %s", asin)
         return ""
 
 
@@ -735,110 +748,126 @@ class RunType(enum.Enum):
     A_Plus_fetch_images="A_Plus_fetch_images"
 
 
-def fetch_text_and_images(df: pd.DataFrame, mode: str, progress_bar: bool = False):
-    scraper = FasthouseScraper()
-    # mode = 'fetch_images' # Allowed values are: fetch_data and fetch_images
-    # input_fpath = './inputs/fh_may.csv'
-    # image_urls_op_file = './outputs/'
+def _max_bullets(df: pd.DataFrame) -> int:
+    if "No of bullets" not in df.columns:
+        return 5
+    values = pd.to_numeric(df["No of bullets"], errors="coerce")
+    top = values.max()
+    return int(top) if pd.notna(top) and top > 0 else 5
+
+
+def fetch_text_and_images(
+    df: pd.DataFrame,
+    mode: str,
+    progress_bar: bool = False,
+    *,
+    on_progress=None,
+    cancel_event=None,
+    workers: int = 1,
+    assets_folder: str = "./assets",
+    output_dir: Optional[str] = "./outputs",
+):
+    """Crawl every row of `df` in `mode` (fetch_data / fetch_images /
+    A_Plus_fetch_images) and return the enriched DataFrame.
+
+    on_progress   optional callback receiving one event dict per row
+    cancel_event  optional threading.Event; remaining rows are skipped once set
+    workers       parallel worker threads (each with its own scraper/session)
+    output_dir    where the legacy Fasthouse__*.csv is written; None to skip
+    progress_bar  legacy flag: draw an st.progress bar (Streamlit thread only)
+    """
     website_format = "new"  # Allowed values are old and new.
 
     # Check if the mode is acceptable.
     RunType(mode)
 
-    # df = scraper.loader(fpath=input_fpath)
-
-    # Smaller sample
-    # data = df.iloc[-5:, :].to_dict('records')
     df = df.astype(object).where(df.notna(), '')
     data = df.to_dict("records")
     # Check if image download can even be carried out or not
     if mode == RunType.fetch_images.value and not any(col in df.columns for col in {"ASIN", "Seller SKU"}):
         raise ValueError("ASIN name required for image download to start.")
 
-    try:
-        if progress_bar:
-            import streamlit as st
+    max_bullets = _max_bullets(df) if mode == RunType.fetch_data.value else 0
 
-            status_bar = st.progress(0)
-            step = 100 / len(data)
+    if progress_bar and on_progress is None:
+        on_progress = streamlit_progress_callback(len(data))
 
-        for index, row in enumerate(data):
-            if progress_bar:
-                status_bar.progress(int((index + 1) * step))
-
-            resp = scraper.make_soup_obj(row["URL"])
-            if resp is None:
-                print(f"[ERROR] Skipping row {index} - could not fetch {row['URL']}")
-                continue
-
-            if mode == RunType.fetch_data.value:
-                row["Title"] = scraper.get_title_v2()
-                row["Price"] = scraper.get_price()
-                print(index, row["Title"])
-
-                max_bullets = int(max(df["No of bullets"]))
-                row.update(
-                    scraper.get_description_and_bullets_v2(max_bullets=max_bullets)
-                    if website_format == "new"
-                    else scraper.get_description_and_bullets(max_bullets=max_bullets)
-                )
-                # Bullets and match
-                row["Bullet match"] = row["No of bullets"] == row["Bullet check"]
-                if row["Bullet check"] == 1 and not str(row.get("Bullet1", "")).strip():
-                    print(f"[WARN] Row {index}: NO description/bullets found for {row['URL']}")
-                else:
-                    print(f"[OK] Row {index}: {row['Bullet check']} bullets captured")
-            # Fetch images
-            if mode == RunType.fetch_images.value:
-                # Keep everything in the same folder
-                row['Size-Chart']=scraper.get_size_chart(product_row=row, folderize=False)
-
-                if(len(scraper.get_video_list()) > 0):
-                    [row.update({'Is Video Available':True})]
-                else:
-                    [row.update({'Is Video Available':False})]
-                image_urls = (
-                    scraper.get_images_v2(product_row=row, folderize=False)
-                    if website_format == "new"
-                    else scraper.get_images(product_row=row, folderize=False)
-                )
-                [row.update(col_url_map) for col_url_map in image_urls]
-
-             # Fetch A+ images
-            if mode == RunType.A_Plus_fetch_images.value:
-                    # Keep everything in the same folder
-                image_urls = (scraper.get_A_Plus_images(product_row=row, folderize=False))
-
-                [row.update(col_url_map) for col_url_map in image_urls]
-
-    except Exception as e:
-        if progress_bar:
-            import streamlit as st
-            st.exception(e)
-        else:
-            raise
-
-    finally:
-        out = pd.DataFrame(data)
-
-        # Rearrange the columns to have all image name cols together
-        if "Is Main Image Background White" in out.columns:
-            out.insert(
-                len(out.columns) - 1, "Is Main Image Background White", out.pop("Is Main Image Background White")
-            )
-        if "Exceeded 9 images" in out.columns:
-            out.insert(len(out.columns) - 1, "Exceeded 9 images", out.pop("Exceeded 9 images"))
-        if "Is Video Available" in out.columns:
-             out.insert(len(out.columns) - 1, "Is Video Available", out.pop("Is Video Available"))
+    def process(index: int, row: dict, scraper: "FasthouseScraper") -> dict:
+        resp = scraper.make_soup_obj(row["URL"])
+        if resp is None:
+            return {"status": "error", "message": f"could not fetch {row['URL']}"}
 
         if mode == RunType.fetch_data.value:
-            fname = "Fasthouse.csv".replace(".csv", "__data.csv")
-        elif mode == RunType.fetch_images.value:
-            fname = "Fasthouse.csv".replace(".csv", "__images.csv")
-        elif mode == RunType.A_Plus_fetch_images.value:
-            fname = "Fasthouse.csv".replace(".csv", "__images.csv")
+            row["Title"] = scraper.get_title_v2()
+            row["Price"] = scraper.get_price()
+            log.info("%s %s", index, row["Title"])
 
-        out.to_csv(fname, sep=",", index=False)
+            row.update(
+                scraper.get_description_and_bullets_v2(max_bullets=max_bullets)
+                if website_format == "new"
+                else scraper.get_description_and_bullets(max_bullets=max_bullets)
+            )
+            # Bullets and match
+            row["Bullet match"] = row["No of bullets"] == row["Bullet check"]
+            if row["Bullet check"] == 1 and not str(row.get("Bullet1", "")).strip():
+                log.warning("Row %s: NO description/bullets found for %s", index, row["URL"])
+                return {"status": "ok", "message": "no description/bullets found"}
+            return {"status": "ok", "message": f"{row['Bullet check']} bullets"}
+
+        # Fetch images
+        if mode == RunType.fetch_images.value:
+            # Keep everything in the same folder
+            row['Size-Chart'] = scraper.get_size_chart(product_row=row, folderize=False)
+            row['Is Video Available'] = len(scraper.get_video_list()) > 0
+
+            image_urls = (
+                scraper.get_images_v2(product_row=row, folderize=False)
+                if website_format == "new"
+                else scraper.get_images(product_row=row, folderize=False)
+            )
+            for col_url_map in image_urls:
+                row.update(col_url_map)
+            failed = next((m["Image Errors"] for m in image_urls if "Image Errors" in m), "")
+            n_images = sum(1 for m in image_urls if any(k == "main" or k.startswith("pt0") for k in m))
+            n_images -= len(failed.split(", ")) if failed else 0
+            n_images += 1 if row['Size-Chart'] else 0
+            if any("main_image_missing" in m for m in image_urls):
+                note = "main image missing on page"
+            elif failed:
+                note = f"{n_images} images, failed: {failed}"
+            else:
+                note = f"{n_images} images"
+            return {"status": "ok", "images": n_images, "message": note}
+
+        # Fetch A+ images
+        if mode == RunType.A_Plus_fetch_images.value:
+            image_urls = scraper.get_A_Plus_images(product_row=row, folderize=False)
+            for col_url_map in image_urls:
+                row.update(col_url_map)
+            return {"status": "ok", "images": len(image_urls), "message": f"{len(image_urls)} A+ images"}
+
+        return {"status": "ok"}
+
+    run_rows(
+        data,
+        process,
+        make_scraper=lambda: FasthouseScraper(assets_folder=assets_folder),
+        workers=workers,
+        on_progress=on_progress,
+        cancel_event=cancel_event,
+    )
+
+    out = pd.DataFrame(data)
+
+    # Rearrange the columns to have all image name cols together
+    for col in ("Is Main Image Background White", "Exceeded 9 images", "Is Video Available", "Image Errors", "Crawl Error"):
+        if col in out.columns:
+            out.insert(len(out.columns) - 1, col, out.pop(col))
+
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+        suffix = "__data.csv" if mode == RunType.fetch_data.value else "__images.csv"
+        out.to_csv(os.path.join(output_dir, "Fasthouse" + suffix), sep=",", index=False)
 
     return out
 
