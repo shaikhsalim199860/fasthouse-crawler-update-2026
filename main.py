@@ -137,7 +137,16 @@ with st.sidebar:
     crawl_type = st.radio("Crawling type", crawl_options)
 
     units = "Inches"
-    if crawl_type == "Size Charts":
+    include_size_chart = False
+    if website == "Fasthouse" and crawl_type == "Images":
+        include_size_chart = st.checkbox(
+            "Add size chart as PT05",
+            value=True,
+            help="Renders the product's size chart (2000x2000 PNG) into listing slot PT05. "
+                 "If the gallery already uses PT05 the chart takes the first free slot after it "
+                 "(PT06, PT07, ...); gallery images are never displaced.",
+        )
+    if crawl_type == "Size Charts" or include_size_chart:
         units = st.radio(
             "Size chart units",
             UNIT_CHOICES,
@@ -181,6 +190,10 @@ with st.sidebar:
     with st.expander("About Size Charts mode", expanded=False):
         st.markdown(
             """
+In **Images** mode, tick *Add size chart as PT05* to get the chart as
+`ASIN.pt05.png` alongside the gallery images (or the next free slot if
+PT05 is taken). The standalone mode below renders charts only.
+
 Reads each product's **Kiwi Sizing** chart (the "What's My Size?" pop-up)
 and renders it to a **2000 x 2000 PNG** named `ASIN.SIZE-CHART.png`:
 heading, measurement diagram, *How to Measure* as one step-by-step
@@ -280,7 +293,11 @@ if run_clicked and df is not None:
             outputs_dir=OUTPUTS_DIR,
             downloads_dir=DOWNLOADS_DIR,
             part_bytes=part_mb * MB,
-            options={"units": units} if crawl_type == "Size Charts" else {},
+            options=(
+                {"units": units} if crawl_type == "Size Charts"
+                else {"units": units, "include_size_chart": True} if include_size_chart
+                else {}
+            ),
         )
         st.rerun()
     except RuntimeError as e:
@@ -385,7 +402,15 @@ if out is not None:
             flags.append(f"{missing} product(s) have no size chart on the website (see 'Size Chart Status')")
         multi = int((pd.to_numeric(out.get("Size Chart Count"), errors="coerce").fillna(0) > 1).sum())
         if multi:
-            flags.append(f"{multi} product(s) have more than one size chart (saved as ASIN.SIZE-CHART-2.png, ...)")
+            flags.append(f"{multi} product(s) have more than one size chart (they take consecutive slots / files)")
+        if "Size Chart Slot" in out.columns:
+            slots = out["Size Chart Slot"].astype(str)
+            no_slot = int(slots.str.contains("none", case=False).sum())
+            if no_slot:
+                flags.append(f"{no_slot} product(s) already use all 9 image slots - their chart is saved as ASIN.SIZE-CHART.png instead")
+            later = int((slots.str.startswith("PT") & ~slots.str.startswith("PT05")).sum())
+            if later:
+                flags.append(f"{later} product(s) had PT05 taken by a gallery image - the chart went to the next free slot")
     for f in flags:
         st.warning(f)
 

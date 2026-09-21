@@ -18,6 +18,16 @@ request. Rows that fail or lose an image to a transient stall are retried
 once, sequentially, after the main pass; anything still failing is listed
 in the *Failed rows* table and the `Crawl Error` / `Image Errors` columns.
 
+## Size chart as PT05 (Fasthouse Images mode)
+
+With *Add size chart as PT05* ticked (default), Images mode also renders the
+product's size chart and saves it as `ASIN.pt05.png` next to the gallery
+JPGs. If the gallery already uses PT05 the chart takes the first free slot
+after it (PT06, PT07, ...); gallery images are never displaced. When all nine
+slots are taken the chart is saved as `ASIN.SIZE-CHART.png` and the row is
+flagged. Products with two charts (bikini top/bottom) take consecutive slots.
+The `Size Chart Slot` / `Size Chart Status` columns say what happened per row.
+
 ## Size Charts mode (Fasthouse)
 
 Fasthouse's size charts come from the Kiwi Sizing app and are injected by

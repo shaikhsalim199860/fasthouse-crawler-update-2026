@@ -735,10 +735,28 @@ class FasthouseScraper(BaseScraper):
         src = img["src"]
         return src if src.startswith("http") else f"https:{src}"
 
-    def get_size_charts_v2(self, product_row: dict, units: str, cache: SizeChartCache, folderize: bool = False) -> dict:
-        """Render every Kiwi Sizing chart for the product to 2000x2000 PNGs
-        named `{ASIN}.SIZE-CHART.png` (`.SIZE-CHART-2.png`, ... for extra
-        charts such as bikini top/bottom). Returns the output columns."""
+    def get_size_charts_v2(
+        self,
+        product_row: dict,
+        units: str,
+        cache: SizeChartCache,
+        folderize: bool = False,
+        first_slot: Optional[int] = None,
+        used_slots: int = 0,
+    ) -> dict:
+        """Render every Kiwi Sizing chart for the product to 2000x2000 PNGs.
+
+        Standalone mode (first_slot is None): files are named
+        `{ASIN}.SIZE-CHART.png` (`.SIZE-CHART-2.png`, ... for extra charts
+        such as bikini top/bottom).
+
+        Listing-slot mode (first_slot given, e.g. 5 for PT05): the chart is
+        named for the listing image slot it should occupy - PT05, or the
+        first free slot after the gallery when the gallery already uses
+        PT05 (`used_slots` = number of gallery images incl. main). Existing
+        gallery images are never displaced; if all 9 slots are taken the
+        chart is still saved as `.SIZE-CHART.png` and the row is flagged.
+        Returns the output columns."""
         asin = product_row.get("ASIN")
         if asin is None or pd.isna(asin) or not str(asin).strip():
             asin = product_row["Seller SKU"]
@@ -747,6 +765,7 @@ class FasthouseScraper(BaseScraper):
             "Size Chart Status": "",
             "Size Chart Name": "",
             "Size Chart File": "",
+            "Size Chart Slot": "",
             "Size Chart Sizes": "",
             "Size Chart Measurements": "",
             "How to Measure": "",
@@ -765,10 +784,20 @@ class FasthouseScraper(BaseScraper):
             result["Size Chart Status"] = "No size chart"
             return result
 
-        files, names, sizes, meas, htm, diagrams = [], [], [], [], [], []
+        files, names, sizes, meas, htm, diagrams, slots = [], [], [], [], [], [], []
+        next_slot = max(int(first_slot), int(used_slots)) if first_slot is not None else None
         for index, chart in enumerate(charts):
             suffix = "" if index == 0 else f"-{index + 1}"
             img_name = f"{asin}.SIZE-CHART{suffix}.png"
+            if next_slot is not None:
+                if next_slot <= 8:
+                    slot_name = f"pt0{next_slot}"
+                    img_name = f"{asin}.{slot_name}.png"
+                    slots.append(slot_name.upper())
+                    result[slot_name] = img_name
+                    next_slot += 1
+                else:
+                    slots.append("none (all 9 image slots used)")
             png = cache.png(self.session, chart, units)
             path = self._image_path(img_name, folderize)
             os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
@@ -786,6 +815,7 @@ class FasthouseScraper(BaseScraper):
             "Size Chart Status": "Found",
             "Size Chart Name": " | ".join(names),
             "Size Chart File": " | ".join(files),
+            "Size Chart Slot": " | ".join(slots),
             "Size Chart Sizes": " | ".join(sizes),
             "Size Chart Measurements": " | ".join(meas),
             "How to Measure": " | ".join(h for h in htm if h),
@@ -862,6 +892,8 @@ def fetch_text_and_images(
     assets_folder: str = "./assets",
     output_dir: Optional[str] = "./outputs",
     units: str = "Inches",
+    include_size_chart: bool = False,
+    size_chart_slot: int = 5,
 ):
     """Crawl every row of `df` in `mode` (fetch_data / fetch_images /
     A_Plus_fetch_images / fetch_size_charts) and return the enriched DataFrame.
@@ -871,7 +903,10 @@ def fetch_text_and_images(
     workers       parallel worker threads (each with its own scraper/session)
     output_dir    where the legacy Fasthouse__*.csv is written; None to skip
     progress_bar  legacy flag: draw an st.progress bar (Streamlit thread only)
-    units         size-chart mode only: "Inches", "Centimetres" or "Both"
+    units         size charts: "Inches", "Centimetres" or "Both"
+    include_size_chart  images mode: also render the Kiwi size chart into the
+                  listing image slot `size_chart_slot` (PT05), or the first
+                  free slot after the gallery when that one is taken
     """
     website_format = "new"  # Allowed values are old and new.
 
@@ -919,7 +954,12 @@ def fetch_text_and_images(
         # Fetch images
         if mode == RunType.fetch_images.value:
             # Keep everything in the same folder
-            row['Size-Chart'] = scraper.get_size_chart(product_row=row, folderize=False)
+            if include_size_chart:
+                # The real size chart goes into a listing slot below; the
+                # theme's fit-guide graphic is only recorded as a URL.
+                row['Fit Guide URL'] = scraper.get_fit_guide_url()
+            else:
+                row['Size-Chart'] = scraper.get_size_chart(product_row=row, folderize=False)
             row['Is Video Available'] = len(scraper.get_video_list()) > 0
 
             image_urls = (
@@ -930,16 +970,28 @@ def fetch_text_and_images(
             for col_url_map in image_urls:
                 row.update(col_url_map)
             failed = next((m["Image Errors"] for m in image_urls if "Image Errors" in m), "")
-            n_images = sum(1 for m in image_urls if any(k == "main" or k.startswith("pt0") for k in m))
-            n_images -= len(failed.split(", ")) if failed else 0
-            n_images += 1 if row['Size-Chart'] else 0
+            gallery = sum(1 for m in image_urls if any(k == "main" or k.startswith("pt0") for k in m))
+            n_images = gallery - (len(failed.split(", ")) if failed else 0)
+            n_images += 1 if row.get('Size-Chart') else 0
+
+            chart_note = ""
+            if include_size_chart:
+                info = scraper.get_size_charts_v2(
+                    product_row=row, units=units, cache=chart_cache, folderize=False,
+                    first_slot=int(size_chart_slot), used_slots=gallery,
+                )
+                row.update(info)
+                n_charts = int(info.get("Size Chart Count") or 0)
+                n_images += n_charts
+                chart_note = f", size chart -> {info['Size Chart Slot']}" if n_charts else ", no size chart"
+
             if any("main_image_missing" in m for m in image_urls):
                 note = "main image missing on page"
             elif failed:
                 note = f"{n_images} images, failed: {failed}"
             else:
                 note = f"{n_images} images"
-            return {"status": "ok", "images": n_images, "message": note}
+            return {"status": "ok", "images": n_images, "message": note + chart_note}
 
         # Size charts (Kiwi Sizing -> rendered PNG)
         if mode == RunType.fetch_size_charts.value:
@@ -966,10 +1018,7 @@ def fetch_text_and_images(
         if mode == RunType.fetch_data.value:
             dst["Bullet match"] = dst.get("No of bullets") == dst.get("Bullet check")
             return {"message": "result copied"}
-        src_asin, dst_asin = asin_of(src), asin_of(dst)
-        copied = copy_asset_files(assets_folder, src_asin, dst_asin)
-        if mode == RunType.fetch_size_charts.value and dst.get("Size Chart File") and src_asin != dst_asin:
-            dst["Size Chart File"] = str(dst["Size Chart File"]).replace(src_asin, dst_asin)
+        copied = copy_asset_files(assets_folder, asin_of(src), asin_of(dst))
         return {"images": copied, "message": f"{copied} files copied"}
 
     run_rows(

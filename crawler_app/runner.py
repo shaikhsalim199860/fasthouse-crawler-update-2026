@@ -34,6 +34,10 @@ _SCRAPED_NAME = re.compile(
     r"Is Main Image Background White|Exceeded 9 images|Image Errors|main|pt0\d|A_Plus_pt0\d+|"
     r"main_image_missing|main_image_error|bg_check_failed|Size Chart .*|How to Measure|Fit Guide URL)$"
 )
+# pt0N columns that hold a per-ASIN file name (the size chart) rather than a
+# shared source URL must be renamed when copied to a sibling ASIN.
+_ASIN_FILE_VALUE = re.compile(r"^(?P<asin>[^.]+)\.(?P<rest>(pt0\d|SIZE-CHART(-\d+)?)\.(png|jpg))$"
+)
 
 
 def row_label(row: dict, index: int) -> str:
@@ -58,12 +62,20 @@ def url_key(row: dict) -> Optional[str]:
 
 
 def copy_scraped_columns(src: dict, dst: dict, input_columns: Iterable[str]) -> None:
-    """Copy everything the crawl added to `src` onto `dst` (same URL)."""
+    """Copy everything the crawl added to `src` onto `dst` (same URL).
+    Values that are file names carrying the source ASIN are renamed to the
+    destination ASIN (the files themselves are copied by copy_asset_files)."""
     inputs = set(input_columns)
+    src_asin, dst_asin = asin_of(src), asin_of(dst)
     for key, value in src.items():
         if key in IDENTITY_COLUMNS:
             continue
         if key not in inputs or _SCRAPED_NAME.match(str(key)):
+            if isinstance(value, str) and src_asin and dst_asin and src_asin != dst_asin:
+                value = " | ".join(
+                    dst_asin + part[len(src_asin):] if part.startswith(src_asin + ".") and _ASIN_FILE_VALUE.match(part) else part
+                    for part in value.split(" | ")
+                )
             dst[key] = value
     # A leader whose retry succeeded no longer carries partial-failure
     # markers; drop stale ones copied during the first pass.
