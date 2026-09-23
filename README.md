@@ -50,6 +50,30 @@ chart name, sizes, measurements, the How-to-Measure sentence, the diagram
 URL and the theme's fit-guide image URL. Fonts: bundled Inter (OFL) in
 `crawler_app/fonts/`.
 
+## SKU checker (AWS)
+
+The **SKU checker** section (sidebar switch) maintains the plain-text SKU
+list that the `FH_New_SKU_Checker` Lambda reads from S3, and can run the
+function on demand. The EventBridge schedule (Mon/Fri) is untouched.
+
+- Shows the current list: SKU count, last-modified time and contents.
+- Updates it from the last crawl result, an uploaded CSV/TXT, or pasted
+  text - either **adding** new SKUs or **replacing** the list. A diff of
+  added/removed SKUs is shown before anything is written, and the previous
+  version is copied to `<dir>/backups/<name>.<timestamp>.txt` first.
+- **Run SKU checker** invokes the Lambda and shows its response.
+- Lists the newest files under `results_prefix` so a run's output can be
+  opened or downloaded.
+
+Configure it with an `[aws]` block in `.streamlit/secrets.toml` (see
+`.streamlit/secrets.toml.example`; the file is git-ignored) and the same
+block in *Settings → Secrets* on Streamlit Cloud. Leave `sku_key` blank to
+browse for the list in the app, then paste the key into secrets.
+
+The IAM user needs `s3:GetObject`/`s3:PutObject` on the SKU key and its
+`backups/` folder, `s3:ListBucket` on the bucket, and
+`lambda:InvokeFunction` on the function.
+
 ## Layout
 
 | Path | Purpose |
@@ -61,6 +85,7 @@ URL and the theme's fit-guide image URL. Fonts: bundled Inter (OFL) in
 | `crawler_app/netutil.py` / `images.py` | Pooled HTTP session with timeouts + retries; image helpers |
 | `fasthouse/scrape.py`, `seven/scrape.py` | Site-specific parsing |
 | `fasthouse/sizechart.py` | Kiwi Sizing extraction + 2000x2000 size chart renderer |
+| `crawler_app/awsio.py` / `skucheck_ui.py` | S3 SKU list + Lambda invoke, and the SKU checker UI |
 
 ## Downloads: one ZIP or split parts
 

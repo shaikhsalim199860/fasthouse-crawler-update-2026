@@ -9,6 +9,7 @@ from PIL import Image
 
 from crawler_app.archive import MB
 from crawler_app.bigfiles import raise_static_file_limit
+from crawler_app import skucheck_ui
 from crawler_app.jobs import IMAGE_CRAWL_TYPES, REGISTRY, Job
 from crawler_app.runner import MAX_WORKERS
 from fasthouse.scrape import fetch_text_and_images
@@ -139,6 +140,14 @@ def validate(df: pd.DataFrame, website: str, crawl_type: str):
 # -----------------------
 # Sidebar
 # -----------------------
+
+section = st.sidebar.radio(
+    "Section", ["Crawler", "SKU checker"], horizontal=True, label_visibility="collapsed"
+)
+
+if section == "SKU checker":
+    skucheck_ui.render()
+    st.stop()
 
 with st.sidebar:
     st.header("Crawl settings")

@@ -9,3 +9,4 @@ static/downloads/*
 *.zip
 *.log
 .vscode/
+.streamlit/secrets.toml
