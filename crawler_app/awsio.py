@@ -29,6 +29,7 @@ class AwsConfig:
     access_key_id: str = ""
     secret_access_key: str = ""
     sku_prefix: str = ""              # where to look when picking the list in the UI
+    backup_prefix: str = ""           # where previous versions are kept
     results_prefix: str = ""          # where the checker writes its output, optional
     lambda_payload: Dict = field(default_factory=dict)
 
@@ -174,15 +175,23 @@ class SkuCheckerClient:
             ContentType=content_type,
         )
 
-    @staticmethod
-    def backup_key_for(key: str, stamp: Optional[str] = None) -> str:
-        """`inputs/SKUS.txt` -> `inputs/backups/SKUS.20260923-1145.txt`."""
+    def backup_key_for(self, key: str, stamp: Optional[str] = None) -> str:
+        """Where the previous version of `key` is copied.
+
+        `backup_prefix` should point OUTSIDE the folder the Lambda reads,
+        so old copies can never be mistaken for input. Without it, a
+        `backups/` sub-folder beside the file is used.
+        """
         stamp = stamp or time.strftime("%Y%m%d-%H%M%S")
         head, _, name = key.rpartition("/")
         base, dot, ext = name.rpartition(".")
         if not dot:
             base, ext = name, "txt"
         backup_name = f"{base}.{stamp}.{ext}"
+
+        prefix = (self.config.backup_prefix or "").strip()
+        if prefix:
+            return prefix.rstrip("/") + "/" + backup_name
         return f"{head}/{BACKUP_FOLDER}/{backup_name}" if head else f"{BACKUP_FOLDER}/{backup_name}"
 
     def update_sku_list(self, key: str, skus: Sequence[str], backup: bool = True) -> Dict:

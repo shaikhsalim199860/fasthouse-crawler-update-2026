@@ -56,11 +56,14 @@ The **SKU checker** section (sidebar switch) maintains the plain-text SKU
 list that the `FH_New_SKU_Checker` Lambda reads from S3, and can run the
 function on demand. The EventBridge schedule (Mon/Fri) is untouched.
 
-- Shows the current list: SKU count, last-modified time and contents.
+- Shows the current list (`inputs/fasthouse/sku-available/SKUS.txt`): SKU
+  count, last-modified time and contents.
 - Updates it from the last crawl result, an uploaded CSV/TXT, or pasted
   text - either **adding** new SKUs or **replacing** the list. A diff of
   added/removed SKUs is shown before anything is written, and the previous
-  version is copied to `<dir>/backups/<name>.<timestamp>.txt` first.
+  version is copied to `backup_prefix` first. That prefix deliberately sits
+  outside the folder the Lambda reads, so an old copy can never be mistaken
+  for input.
 - **Run SKU checker** invokes the Lambda and shows its response.
 - Lists the newest files under `results_prefix` so a run's output can be
   opened or downloaded.

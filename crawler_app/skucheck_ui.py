@@ -40,23 +40,26 @@ def load_config() -> AwsConfig:
         access_key_id=str(raw.get("access_key_id", "")).strip(),
         secret_access_key=str(raw.get("secret_access_key", "")).strip(),
         sku_prefix=str(raw.get("sku_prefix", "")).strip(),
+        backup_prefix=str(raw.get("backup_prefix", "")).strip(),
         results_prefix=str(raw.get("results_prefix", "")).strip(),
         lambda_payload=dict(raw.get("lambda_payload", {}) or {}),
     )
 
 
 @st.cache_resource(show_spinner=False)
-def _client(region: str, bucket: str, key_id: str, secret: str, sku_key: str,
-            lambda_arn: str, sku_prefix: str, results_prefix: str) -> SkuCheckerClient:
+def _client(region: str, bucket: str, key_id: str, secret: str, sku_key: str, lambda_arn: str,
+            sku_prefix: str, backup_prefix: str, results_prefix: str) -> SkuCheckerClient:
     return SkuCheckerClient(AwsConfig(
         region=region, bucket=bucket, access_key_id=key_id, secret_access_key=secret,
-        sku_key=sku_key, lambda_arn=lambda_arn, sku_prefix=sku_prefix, results_prefix=results_prefix,
+        sku_key=sku_key, lambda_arn=lambda_arn, sku_prefix=sku_prefix,
+        backup_prefix=backup_prefix, results_prefix=results_prefix,
     ))
 
 
 def get_client(config: AwsConfig) -> SkuCheckerClient:
     return _client(config.region, config.bucket, config.access_key_id, config.secret_access_key,
-                   config.sku_key, config.lambda_arn, config.sku_prefix, config.results_prefix)
+                   config.sku_key, config.lambda_arn, config.sku_prefix,
+                   config.backup_prefix, config.results_prefix)
 
 
 def skus_from_dataframe(df: pd.DataFrame) -> List[str]:
