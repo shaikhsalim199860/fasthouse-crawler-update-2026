@@ -1,15 +1,17 @@
 import logging
 import zipfile
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 log = logging.getLogger(__name__)
 
 MB = 1024 * 1024
 
-# Streamlit's static file server refuses files above 200 MB, and holding a
+# Streamlit's static file server refuses files above 200 MB unless the
+# limit is raised (see crawler_app.bigfiles), and holding a
 # multi-hundred-MB zip in RAM for st.download_button is what used to crash
-# the app, so the archive is always split into bounded parts.
+# the app. `max_part_bytes=None` produces one archive of any size, which is
+# safe only when it is served from disk.
 DEFAULT_PART_BYTES = 150 * MB
 MAX_PART_BYTES = 190 * MB
 
@@ -18,17 +20,18 @@ def build_zip_parts(
     src_dir: Path,
     out_dir: Path,
     base_name: str,
-    max_part_bytes: int = DEFAULT_PART_BYTES,
+    max_part_bytes: Optional[int] = DEFAULT_PART_BYTES,
 ) -> List[Path]:
     """Zip every file under `src_dir` into one or more archives of at most
     ~`max_part_bytes` each (a single file larger than the limit still gets
-    its own part). JPEGs are stored uncompressed (deflate gains nothing and
-    costs CPU); CSV/text files are deflated. Returns the part paths in order.
+    its own part); `None` means no limit, i.e. exactly one archive. JPEGs
+    are stored uncompressed (deflate gains nothing and costs CPU); CSV/text
+    files are deflated. Returns the part paths in order.
     """
     src_dir = Path(src_dir)
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    max_part_bytes = max(1 * MB, min(int(max_part_bytes), MAX_PART_BYTES))
+    limit = float("inf") if max_part_bytes is None else max(1 * MB, min(int(max_part_bytes), MAX_PART_BYTES))
 
     files = sorted(p for p in src_dir.rglob("*") if p.is_file())
     # Small companion files (the image CSV) go first so they land in part 1.
@@ -40,7 +43,7 @@ def build_zip_parts(
     current_size = 0
     for f in files:
         size = f.stat().st_size
-        if current and current_size + size > max_part_bytes:
+        if current and current_size + size > limit:
             groups.append(current)
             current, current_size = [], 0
         current.append(f)

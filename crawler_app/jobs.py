@@ -174,7 +174,7 @@ class JobRegistry:
         assets_dir: Path,
         outputs_dir: Path,
         downloads_dir: Path,
-        part_bytes: int = DEFAULT_PART_BYTES,
+        part_bytes: Optional[int] = DEFAULT_PART_BYTES,
         options: Optional[Dict] = None,
     ) -> Job:
         with self._lock:
@@ -231,7 +231,7 @@ def _run_job(
     assets_dir: Path,
     outputs_dir: Path,
     downloads_dir: Path,
-    part_bytes: int,
+    part_bytes: Optional[int],
 ) -> None:
     try:
         job.status = "running"

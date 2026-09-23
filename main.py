@@ -8,6 +8,7 @@ import streamlit as st
 from PIL import Image
 
 from crawler_app.archive import MB
+from crawler_app.bigfiles import raise_static_file_limit
 from crawler_app.jobs import IMAGE_CRAWL_TYPES, REGISTRY, Job
 from crawler_app.runner import MAX_WORKERS
 from fasthouse.scrape import fetch_text_and_images
@@ -27,6 +28,18 @@ OUTPUTS_DIR = ROOT / "outputs"
 # archive never has to be held in RAM.
 DOWNLOADS_DIR = ROOT / "static" / "downloads"
 STATIC_SERVING = bool(st.get_option("server.enableStaticServing"))
+# Ceiling for a single served archive; far above any realistic batch.
+SINGLE_FILE_LIMIT = 20 * 1024 * MB
+
+
+@st.cache_resource(show_spinner=False)
+def _enable_big_downloads() -> bool:
+    """Raise Streamlit's 200 MB static-file cap once per process so a whole
+    batch can be served as one ZIP streamed from disk."""
+    return STATIC_SERVING and raise_static_file_limit(SINGLE_FILE_LIMIT) > 0
+
+
+BIG_DOWNLOADS = _enable_big_downloads()
 
 CRAWLERS = {"Fasthouse": fetch_text_and_images, "Seven": seven_start}
 
@@ -164,15 +177,23 @@ with st.sidebar:
             help="Rows crawled at the same time. 3 is a safe default; raise it for speed, "
                  "lower it to 1 if the site starts returning 429 errors.",
         )
-        part_mb = st.slider(
-            "Max ZIP part size (MB)",
-            min_value=50,
-            max_value=190,
-            value=150,
-            step=10,
-            help="Large image sets are split into several ZIP files of at most this size "
-                 "so downloads stay reliable and the server never holds a huge archive in memory.",
+        single_zip = BIG_DOWNLOADS and st.checkbox(
+            "Download as one ZIP file",
+            value=True,
+            help="Serves the whole batch as a single archive, streamed from disk. "
+                 "Untick to split it into smaller parts, which is safer on a flaky connection.",
         )
+        part_mb = 150
+        if not single_zip:
+            part_mb = st.slider(
+                "Max ZIP part size (MB)",
+                min_value=50,
+                max_value=190,
+                value=150,
+                step=10,
+                help="Large image sets are split into several ZIP files of at most this size "
+                     "so downloads stay reliable and the server never holds a huge archive in memory.",
+            )
 
     st.divider()
     with st.expander("Input file format", expanded=False):
@@ -204,6 +225,8 @@ diagram URL per row.
         )
     if not STATIC_SERVING:
         st.caption("Static file serving is off - ZIP parts are served through download buttons one part at a time.")
+    elif not BIG_DOWNLOADS:
+        st.caption("This Streamlit version caps served files at 200 MB, so large batches are still split into parts.")
 
 
 # -----------------------
@@ -292,7 +315,7 @@ if run_clicked and df is not None:
             assets_dir=ASSETS_DIR,
             outputs_dir=OUTPUTS_DIR,
             downloads_dir=DOWNLOADS_DIR,
-            part_bytes=part_mb * MB,
+            part_bytes=None if single_zip else part_mb * MB,
             options=(
                 {"units": units} if crawl_type == "Size Charts"
                 else {"units": units, "include_size_chart": True} if include_size_chart
@@ -464,6 +487,8 @@ if job.is_image_job:
                 f"The images are split into **{len(parts)} ZIP parts** ({fmt_size(total_bytes)} total). "
                 "Each part is a normal ZIP - extract all of them into the same folder."
             )
+        elif total_bytes > 200 * MB:
+            st.caption(f"One archive of {fmt_size(total_bytes)}, streamed from disk - keep the tab open until it finishes.")
         if STATIC_SERVING:
             for i, p in enumerate(parts):
                 label = f"⬇ Download images ZIP ({fmt_size(p.stat().st_size)})" if len(parts) == 1 \

@@ -60,15 +60,21 @@ URL and the theme's fit-guide image URL. Fonts: bundled Inter (OFL) in
 | `fasthouse/scrape.py`, `seven/scrape.py` | Site-specific parsing |
 | `fasthouse/sizechart.py` | Kiwi Sizing extraction + 2000x2000 size chart renderer |
 
-## Why the split ZIPs / static serving
+## Downloads: one ZIP or split parts
 
-A 1500×1500 JPEG is ~0.4 MB and a product has up to 9 of them, so 150+ ASINs
-produce a 300–500 MB archive. `st.download_button` has to hold its payload in
-RAM, which is what used to crash the app past ~150 ASINs. Archives are now
+A 1500×1500 JPEG is ~0.4 MB and a product has up to 9 of them, so a 135-row
+batch produces a ~560 MB archive. `st.download_button` has to hold its payload
+in RAM, which is what used to crash the app past ~150 ASINs. Archives are
 written to `static/downloads/` and served straight from disk
-(`server.enableStaticServing` in `.streamlit/config.toml`), split into parts of
-at most 190 MB (Streamlit's static-file limit is 200 MB). If static serving is
-disabled the UI falls back to download buttons, one part at a time.
+(`server.enableStaticServing` in `.streamlit/config.toml`), so nothing is
+buffered in memory.
+
+Streamlit's static route refuses files above 200 MB, so `crawler_app/bigfiles.py`
+raises that cap at startup and the batch is delivered as **one ZIP** by default
+(*Download as one ZIP file* in the sidebar). Untick it to split the archive into
+parts of at most 190 MB instead - useful on a flaky connection. If the cap
+cannot be raised (a future Streamlit version moving the constant) or static
+serving is off, the app falls back to split parts automatically.
 
 ## Running locally
 
