@@ -21,12 +21,17 @@ in the *Failed rows* table and the `Crawl Error` / `Image Errors` columns.
 ## Size chart as PT05 (Fasthouse Images mode)
 
 With *Add size chart as PT05* ticked (default), Images mode also renders the
-product's size chart and saves it as `ASIN.pt05.png` next to the gallery
-JPGs. If the gallery already uses PT05 the chart takes the first free slot
-after it (PT06, PT07, ...); gallery images are never displaced. When all nine
-slots are taken the chart is saved as `ASIN.SIZE-CHART.png` and the row is
-flagged. Products with two charts (bikini top/bottom) take consecutive slots.
-The `Size Chart Slot` / `Size Chart Status` columns say what happened per row.
+product's size chart and saves it as `ASIN.pt05.png` next to the gallery JPGs.
+
+The chart claims PT05 and the **gallery shifts down around it**: what the site
+shows 6th becomes PT06, 7th becomes PT07 and so on. Amazon has nine slots
+(MAIN + PT01-PT08), and Fasthouse galleries often fill all nine, so the
+trailing gallery image(s) are dropped to make room - the chart is never pushed
+to the end of the listing. Products with two charts (bikini top/bottom) take
+PT05 + PT06.
+
+Per-row columns: `Size Chart Slot` (e.g. `PT05`), `Size Chart Status`
+(Found / No size chart) and `Gallery Images Dropped`.
 
 ## Size Charts mode (Fasthouse)
 

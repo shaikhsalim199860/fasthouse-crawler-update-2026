@@ -5,7 +5,7 @@ import html as html_lib
 import json
 import logging
 import unicodedata
-from typing import Optional
+from typing import List, Optional, Set
 from typing import Tuple, Text, Union
 import requests
 import bs4
@@ -551,6 +551,24 @@ class FasthouseScraper(BaseScraper):
         return {"img_name": img_name, "image_url_col_name": image_url_col_name}
 
     @staticmethod
+    def _gallery_slots(count: int, reserved: Set[int]) -> List[Optional[int]]:
+        """Listing slot for each gallery image: 0 = MAIN, 1-8 = PT01-PT08.
+
+        Slots reserved for the size chart are skipped, so the gallery keeps
+        its order and shifts down past the chart. Amazon has nine slots in
+        total, so when the gallery no longer fits its trailing images are
+        dropped (None) rather than the chart being pushed to the end.
+        """
+        free = [slot for slot in range(1, 9) if slot not in reserved]
+        slots: List[Optional[int]] = []
+        for position in range(count):
+            if position == 0:
+                slots.append(0)          # MAIN is never reserved
+            else:
+                slots.append(free.pop(0) if free else None)
+        return slots
+
+    @staticmethod
     def _hi_res_url(src: str) -> str:
         """Turn a thumbnail src into the 1500px rendition.
 
@@ -646,7 +664,18 @@ class FasthouseScraper(BaseScraper):
         with Image.open(img_path) as im:
             return {"Is Main Image Background White": is_background_white(im)}
 
-    def get_images_v2(self, product_row: dict, folderize: bool = True) -> list:
+    def get_images_v2(
+        self,
+        product_row: dict,
+        folderize: bool = True,
+        reserved_slots: Optional[Set[int]] = None,
+    ) -> list:
+        """Download the product gallery into the listing image slots.
+
+        `reserved_slots` holds slots already claimed by the size chart
+        (PT05 by default); the gallery skips them and its trailing images
+        are dropped if nine slots are not enough.
+        """
         asin = product_row.get("ASIN")
         if pd.isna(asin) or not str(asin).strip():
             asin = product_row["Seller SKU"]
@@ -657,15 +686,18 @@ class FasthouseScraper(BaseScraper):
         image_urls = []
         main_image: Optional[Image.Image] = None
         failed_images = []
+        dropped = 0
 
         if thumbnails:
-            for index, thumbnail in enumerate(thumbnails):
+            slots = self._gallery_slots(len(thumbnails), set(reserved_slots or ()))
 
-                if index == 9:
-                    image_urls.append({"Exceeded 9 images": True})
-                    break
+            for index, (thumbnail, slot) in enumerate(zip(thumbnails, slots)):
 
-                meta = self._get_image_metadata(asin=asin, index=index)
+                if slot is None:
+                    dropped += 1
+                    continue
+
+                meta = self._get_image_metadata(asin=asin, index=slot)
                 img_name, image_url_col_name = meta["img_name"], meta["image_url_col_name"]
 
                 try:
@@ -677,13 +709,17 @@ class FasthouseScraper(BaseScraper):
 
                     image_urls.append({image_url_col_name: url})
                     img = self._download_square_1500(url=url, img_name=img_name, folderize=folderize)
-                    if index == 0:
+                    if slot == 0:
                         main_image = img
 
                 except Exception as e:
                     log.error("Thumbnail failed for %s index %s: %s", asin, index, e)
                     failed_images.append(image_url_col_name)
                     continue
+
+            if dropped:
+                log.info("%s: dropped %s trailing gallery image(s) - all 9 slots used", asin, dropped)
+                image_urls.append({"Exceeded 9 images": True, "Gallery Images Dropped": dropped})
 
         else:
             img_name = f"{asin}.main.jpg"
@@ -742,7 +778,6 @@ class FasthouseScraper(BaseScraper):
         cache: SizeChartCache,
         folderize: bool = False,
         first_slot: Optional[int] = None,
-        used_slots: int = 0,
     ) -> dict:
         """Render every Kiwi Sizing chart for the product to 2000x2000 PNGs.
 
@@ -750,13 +785,11 @@ class FasthouseScraper(BaseScraper):
         `{ASIN}.SIZE-CHART.png` (`.SIZE-CHART-2.png`, ... for extra charts
         such as bikini top/bottom).
 
-        Listing-slot mode (first_slot given, e.g. 5 for PT05): the chart is
-        named for the listing image slot it should occupy - PT05, or the
-        first free slot after the gallery when the gallery already uses
-        PT05 (`used_slots` = number of gallery images incl. main). Existing
-        gallery images are never displaced; if all 9 slots are taken the
-        chart is still saved as `.SIZE-CHART.png` and the row is flagged.
-        Returns the output columns."""
+        Listing-slot mode (first_slot given, e.g. 5 for PT05): the chart
+        claims that slot (and the following ones when a product has several
+        charts) and is named for it, e.g. `{ASIN}.pt05.png`. The gallery is
+        laid out around the reserved slots afterwards - see
+        `get_images_v2(reserved_slots=...)`. Returns the output columns."""
         asin = product_row.get("ASIN")
         if asin is None or pd.isna(asin) or not str(asin).strip():
             asin = product_row["Seller SKU"]
@@ -785,7 +818,7 @@ class FasthouseScraper(BaseScraper):
             return result
 
         files, names, sizes, meas, htm, diagrams, slots = [], [], [], [], [], [], []
-        next_slot = max(int(first_slot), int(used_slots)) if first_slot is not None else None
+        next_slot = int(first_slot) if first_slot is not None else None
         for index, chart in enumerate(charts):
             suffix = "" if index == 0 else f"-{index + 1}"
             img_name = f"{asin}.SIZE-CHART{suffix}.png"
@@ -797,7 +830,7 @@ class FasthouseScraper(BaseScraper):
                     result[slot_name] = img_name
                     next_slot += 1
                 else:
-                    slots.append("none (all 9 image slots used)")
+                    slots.append("no free slot")
             png = cache.png(self.session, chart, units)
             path = self._image_path(img_name, folderize)
             os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
@@ -954,16 +987,29 @@ def fetch_text_and_images(
         # Fetch images
         if mode == RunType.fetch_images.value:
             # Keep everything in the same folder
+            chart_note = ""
+            n_charts = 0
+            reserved: Set[int] = set()
+
             if include_size_chart:
-                # The real size chart goes into a listing slot below; the
+                # The chart is rendered FIRST so it can claim PT05; the
+                # gallery is then laid out around the reserved slot(s). The
                 # theme's fit-guide graphic is only recorded as a URL.
                 row['Fit Guide URL'] = scraper.get_fit_guide_url()
+                info = scraper.get_size_charts_v2(
+                    product_row=row, units=units, cache=chart_cache, folderize=False,
+                    first_slot=int(size_chart_slot),
+                )
+                row.update(info)
+                n_charts = int(info.get("Size Chart Count") or 0)
+                reserved = {s for s in range(int(size_chart_slot), int(size_chart_slot) + n_charts) if s <= 8}
+                chart_note = f", size chart -> {info['Size Chart Slot']}" if n_charts else ", no size chart"
             else:
                 row['Size-Chart'] = scraper.get_size_chart(product_row=row, folderize=False)
             row['Is Video Available'] = len(scraper.get_video_list()) > 0
 
             image_urls = (
-                scraper.get_images_v2(product_row=row, folderize=False)
+                scraper.get_images_v2(product_row=row, folderize=False, reserved_slots=reserved)
                 if website_format == "new"
                 else scraper.get_images(product_row=row, folderize=False)
             )
@@ -971,19 +1017,12 @@ def fetch_text_and_images(
                 row.update(col_url_map)
             failed = next((m["Image Errors"] for m in image_urls if "Image Errors" in m), "")
             gallery = sum(1 for m in image_urls if any(k == "main" or k.startswith("pt0") for k in m))
-            n_images = gallery - (len(failed.split(", ")) if failed else 0)
+            n_images = gallery - (len(failed.split(", ")) if failed else 0) + n_charts
             n_images += 1 if row.get('Size-Chart') else 0
 
-            chart_note = ""
-            if include_size_chart:
-                info = scraper.get_size_charts_v2(
-                    product_row=row, units=units, cache=chart_cache, folderize=False,
-                    first_slot=int(size_chart_slot), used_slots=gallery,
-                )
-                row.update(info)
-                n_charts = int(info.get("Size Chart Count") or 0)
-                n_images += n_charts
-                chart_note = f", size chart -> {info['Size Chart Slot']}" if n_charts else ", no size chart"
+            dropped = int(next((m["Gallery Images Dropped"] for m in image_urls if "Gallery Images Dropped" in m), 0))
+            if dropped:
+                chart_note += f", {dropped} trailing gallery image(s) dropped"
 
             if any("main_image_missing" in m for m in image_urls):
                 note = "main image missing on page"
@@ -1036,7 +1075,8 @@ def fetch_text_and_images(
         out["Size Chart Count"] = pd.to_numeric(out["Size Chart Count"], errors="coerce").fillna(0).astype(int)
 
     # Rearrange the columns to have all image name cols together
-    for col in ("Is Main Image Background White", "Exceeded 9 images", "Is Video Available", "Image Errors", "Crawl Error"):
+    for col in ("Is Main Image Background White", "Exceeded 9 images", "Gallery Images Dropped",
+                "Is Video Available", "Image Errors", "Crawl Error"):
         if col in out.columns:
             out.insert(len(out.columns) - 1, col, out.pop(col))
 

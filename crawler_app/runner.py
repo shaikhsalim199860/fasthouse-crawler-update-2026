@@ -31,7 +31,7 @@ IDENTITY_COLUMNS = {"Seller SKU", "ASIN", "URL", "No of bullets", "Crawl Error"}
 # re-uploaded, for instance) and therefore must still be copied.
 _SCRAPED_NAME = re.compile(
     r"^(Title|Price|Description|Bullet check|Bullet match|Bullet\d+|Size-Chart|Is Video Available|"
-    r"Is Main Image Background White|Exceeded 9 images|Image Errors|main|pt0\d|A_Plus_pt0\d+|"
+    r"Is Main Image Background White|Exceeded 9 images|Gallery Images Dropped|Image Errors|main|pt0\d|A_Plus_pt0\d+|"
     r"main_image_missing|main_image_error|bg_check_failed|Size Chart .*|How to Measure|Fit Guide URL)$"
 )
 # pt0N columns that hold a per-ASIN file name (the size chart) rather than a

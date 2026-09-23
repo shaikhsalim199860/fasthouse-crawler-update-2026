@@ -143,8 +143,8 @@ with st.sidebar:
             "Add size chart as PT05",
             value=True,
             help="Renders the product's size chart (2000x2000 PNG) into listing slot PT05. "
-                 "If the gallery already uses PT05 the chart takes the first free slot after it "
-                 "(PT06, PT07, ...); gallery images are never displaced.",
+                 "The gallery shifts down around it (old PT05 becomes PT06, ...); when all nine "
+                 "slots are needed, the last gallery image is dropped.",
         )
     if crawl_type == "Size Charts" or include_size_chart:
         units = st.radio(
@@ -403,14 +403,14 @@ if out is not None:
         multi = int((pd.to_numeric(out.get("Size Chart Count"), errors="coerce").fillna(0) > 1).sum())
         if multi:
             flags.append(f"{multi} product(s) have more than one size chart (they take consecutive slots / files)")
-        if "Size Chart Slot" in out.columns:
-            slots = out["Size Chart Slot"].astype(str)
-            no_slot = int(slots.str.contains("none", case=False).sum())
-            if no_slot:
-                flags.append(f"{no_slot} product(s) already use all 9 image slots - their chart is saved as ASIN.SIZE-CHART.png instead")
-            later = int((slots.str.startswith("PT") & ~slots.str.startswith("PT05")).sum())
-            if later:
-                flags.append(f"{later} product(s) had PT05 taken by a gallery image - the chart went to the next free slot")
+        if "Gallery Images Dropped" in out.columns:
+            dropped = pd.to_numeric(out["Gallery Images Dropped"], errors="coerce").fillna(0)
+            n = int((dropped > 0).sum())
+            if n:
+                flags.append(
+                    f"{n} product(s) had a full gallery - their last gallery image(s) were dropped "
+                    "to make room for the size chart (see 'Gallery Images Dropped')"
+                )
     for f in flags:
         st.warning(f)
 
