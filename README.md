@@ -42,7 +42,12 @@ JavaScript, so they are not in the page HTML. The crawler reads the
 **2000 x 2000 PNG** named `ASIN.SIZE-CHART.png` (`-2`, `-3` for products
 with several charts, e.g. bikini top/bottom): heading, measurement diagram,
 "How to Measure" as one step-by-step sentence, the table in inches, cm or
-both, and the notes. Only `Label: instruction` lines become numbered steps -
+both, and the notes. Charts that render identically are de-duplicated -
+Kiwi can return the same chart twice when a shop leaves a copy in place
+(Fasthouse has a `Gloves - SpeedStyle - Adult clone`), which would
+otherwise fill two image slots with the same picture. Genuinely different
+charts (bikini top vs bottom) are all kept.
+Only `Label: instruction` lines become numbered steps -
 other prose (such as the red "All measurements are garment measurements"
 warning) is kept as a note, in its position and colour from the site. Charts shared by many products are rendered once.
 The CSV/Excel output records the status per row (Found / No size chart),

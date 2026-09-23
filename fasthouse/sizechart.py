@@ -223,9 +223,56 @@ def parse_charts(payload: dict) -> List[SizeChart]:
     return charts
 
 
+def _fingerprint(chart: SizeChart) -> tuple:
+    """Identity of a chart by what it actually shows, ignoring its name."""
+    tables = tuple(
+        tuple(
+            tuple((str(cell.get("value", "")), str(cell.get("unitType", ""))) for cell in row)
+            for row in table.rows
+        )
+        for table in chart.tables
+    )
+    return (
+        chart.heading.strip().lower(),
+        chart.diagram_url,
+        tuple(chart.how_to_measure),
+        tables,
+        tuple(n.text for n in chart.intro_notes),
+        tuple(n.text for n in chart.notes),
+    )
+
+
+def dedupe_charts(charts: List[SizeChart]) -> List[SizeChart]:
+    """Drop charts that render identically.
+
+    Kiwi can return the same chart more than once when a shop has left a
+    duplicate definition in place - Fasthouse has a
+    "Gloves - SpeedStyle - Adult clone" matched by the same product tag as
+    the original. Without this, a product would get the same size chart
+    twice and the gallery would be pushed down a slot for nothing. Charts
+    that genuinely differ (bikini top vs bottom) are all kept; among
+    identical ones the lowest id wins, which is the original definition
+    rather than a later copy.
+    """
+    winners: Dict[tuple, SizeChart] = {}
+    order: List[tuple] = []
+    for chart in charts:
+        key = _fingerprint(chart)
+        if key not in winners:
+            winners[key] = chart
+            order.append(key)
+            continue
+        kept = winners[key]
+        loser, keeper = (kept, chart) if chart.id < kept.id else (chart, kept)
+        winners[key] = keeper
+        log.info("Dropping duplicate size chart %r (id %s); keeping %r (id %s)",
+                 loser.name, loser.id, keeper.name, keeper.id)
+    return [winners[key] for key in order]
+
+
 def fetch_size_charts(session: requests.Session, kiwi_data: Dict[str, str]) -> List[SizeChart]:
     raw = fetch_bytes(session, KIWI_API + "?" + requests.compat.urlencode(kiwi_data))
-    return parse_charts(json.loads(raw))
+    return dedupe_charts(parse_charts(json.loads(raw)))
 
 
 # ---------------------------------------------------------------- units
