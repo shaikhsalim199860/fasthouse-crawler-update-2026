@@ -248,9 +248,13 @@ class SkuCheckerClient:
         """Probe each permission the app needs; returns (label, ok, detail)."""
         checks: List[Tuple[str, bool, str]] = []
 
+        # Listed with the prefix rather than head_bucket: head_bucket sends
+        # no s3:prefix, so an IAM policy that scopes ListBucket to a prefix
+        # would deny it even though every operation the app needs is allowed.
+        prefix = self.config.sku_prefix or (self.config.sku_key.rpartition("/")[0] + "/")
         try:
-            self.s3.head_bucket(Bucket=self.config.bucket)
-            checks.append(("S3 bucket reachable", True, self.config.bucket))
+            self.s3.list_objects_v2(Bucket=self.config.bucket, Prefix=prefix, MaxKeys=1)
+            checks.append(("S3 bucket reachable", True, f"{self.config.bucket}/{prefix}"))
         except Exception as e:  # noqa: BLE001
             checks.append(("S3 bucket reachable", False, str(e)))
             return checks
