@@ -44,6 +44,17 @@ class ChartTable:
 
 
 @dataclass
+class ChartNote:
+    """A line of chart prose that is not a measurement step, e.g. the red
+    "All measurements are garment measurements" warning. The inline colour
+    and bold from the source are kept so the note reads as it does on the
+    site."""
+    text: str
+    color: Optional[Tuple[int, int, int]] = None
+    bold: bool = False
+
+
+@dataclass
 class SizeChart:
     id: int
     name: str
@@ -51,7 +62,8 @@ class SizeChart:
     heading: str = ""
     diagram_url: str = ""
     how_to_measure: List[Tuple[str, str]] = field(default_factory=list)   # (label, instruction)
-    notes: List[str] = field(default_factory=list)
+    intro_notes: List["ChartNote"] = field(default_factory=list)   # before the table
+    notes: List["ChartNote"] = field(default_factory=list)         # after the table
     tables: List[ChartTable] = field(default_factory=list)
     decimals: int = 1
 
@@ -110,26 +122,55 @@ def parse_kiwi_data(page_html: str) -> Optional[Dict[str, str]]:
     return data
 
 
-def _html_to_lines(fragment: str) -> List[str]:
-    text = re.sub(r"<br\s*/?>", "\n", fragment, flags=re.I)
-    text = re.sub(r"</(p|h[1-6]|li|div)>", "\n", text, flags=re.I)
-    text = re.sub(r"<[^>]+>", "", text)
-    text = html_lib.unescape(text).replace("\xa0", " ")
-    return [re.sub(r"\s+", " ", ln).strip() for ln in text.split("\n") if ln.strip()]
+_COLOR_RE = re.compile(r"color:\s*rgb\((\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\)", re.I)
+_LINE_SPLIT_RE = re.compile(r"<br\s*/?>|</p>|</h[1-6]>|</li>|</div>", re.I)
 
 
-def _parse_how_to_measure(lines: List[str]) -> List[Tuple[str, str]]:
-    steps = []
-    for ln in lines:
-        if re.match(r"^\s*how\s+to\s+measure\s*:?\s*$", ln, re.I):
+def _html_to_rich_lines(fragment: str) -> List[Tuple[str, Optional[Tuple[int, int, int]], bool]]:
+    """Split a Kiwi rich-text block into (text, colour, bold) lines.
+
+    Kiwi wraps each line in its own <span style="color: rgb(...)">, so the
+    emphasis the site shows (such as the red garment-measurements warning)
+    can be carried through to the rendered chart.
+    """
+    lines = []
+    for chunk in _LINE_SPLIT_RE.split(fragment or ""):
+        text = re.sub(r"<[^>]+>", "", chunk)
+        text = html_lib.unescape(text).replace("\xa0", " ")
+        text = re.sub(r"\s+", " ", text).strip()
+        if not text:
             continue
-        ln = re.sub(r"^\s*how\s+to\s+measure\s*:\s*", "", ln, flags=re.I)
-        m = re.match(r"^([A-Za-z][A-Za-z /&()-]{0,40}?)\s*:\s*(.+)$", ln)
-        if m:
+        match = _COLOR_RE.search(chunk)
+        color = tuple(min(255, int(g)) for g in match.groups()) if match else None
+        lines.append((text, color, "<strong" in chunk.lower() or "<b>" in chunk.lower()))
+    return lines
+
+
+def _html_to_lines(fragment: str) -> List[str]:
+    return [text for text, _, _ in _html_to_rich_lines(fragment)]
+
+
+def _parse_how_to_measure(rich_lines) -> Tuple[List[Tuple[str, str]], List[ChartNote]]:
+    """Split a "How to Measure" block into numbered steps and plain notes.
+
+    The site writes each step as "Label: instruction"; anything else in the
+    block is prose, such as "All measurements are garment measurements, NOT
+    body measurements." - a warning, not a step, so it must not be numbered.
+    """
+    steps: List[Tuple[str, str]] = []
+    notes: List[ChartNote] = []
+    for text, color, bold in rich_lines:
+        if re.match(r"^\s*how\s+to\s+measure\s*:?\s*$", text, re.I):
+            continue
+        text = re.sub(r"^\s*how\s+to\s+measure\s*:\s*", "", text, flags=re.I).strip()
+        if not text:
+            continue
+        m = re.match(r"^([A-Za-z][A-Za-z /&()-]{0,40}?)\s*:\s*(.+)$", text)
+        if m and len(m.group(1).split()) <= 3:
             steps.append((m.group(1).strip(), m.group(2).strip()))
-        elif ln:
-            steps.append(("", ln))
-    return steps
+        else:
+            notes.append(ChartNote(text=text, color=color, bold=bold))
+    return steps, notes
 
 
 def parse_charts(payload: dict) -> List[SizeChart]:
@@ -146,20 +187,27 @@ def parse_charts(payload: dict) -> List[SizeChart]:
             decimals=decimals,
         )
         tables = sizing.get("tables") or {}
+
+        def add_notes(items: List[ChartNote]) -> None:
+            # Notes keep their position relative to the table, as on the site.
+            (chart.notes if chart.tables else chart.intro_notes).extend(items)
+
         for block in (sizing.get("layout") or {}).get("data") or []:
             btype = block.get("type")
             if btype == 0:                              # rich text
-                lines = _html_to_lines(block.get("value") or "")
-                if not lines:
+                rich = _html_to_rich_lines(block.get("value") or "")
+                if not rich:
                     continue
-                joined = " ".join(lines)
+                joined = " ".join(text for text, _, _ in rich)
                 if re.search(r"how\s+to\s+measure", joined, re.I):
-                    chart.how_to_measure += _parse_how_to_measure(lines)
+                    steps, extra = _parse_how_to_measure(rich)
+                    chart.how_to_measure += steps
+                    add_notes(extra)
                 elif not chart.heading and not chart.tables:
-                    chart.heading = lines[0]
-                    chart.notes += lines[1:]
+                    chart.heading = rich[0][0]
+                    add_notes([ChartNote(t, c, b) for t, c, b in rich[1:]])
                 else:
-                    chart.notes += lines
+                    add_notes([ChartNote(t, c, b) for t, c, b in rich])
             elif btype == 6:                            # image
                 url = ((block.get("data") or {}).get("url") or "").strip()
                 if url and not chart.diagram_url:
@@ -331,6 +379,15 @@ class ChartRenderer:
                 y += s(46)
             y += s(30)
 
+        # Notes that belong above the table (the red garment-measurements
+        # warning), left aligned and in their original colour.
+        for note in self.chart.intro_notes:
+            font_i = _Fonts.get(s(30), bold=note.bold)
+            for line in _wrap(draw, note.text, font_i, content_w):
+                draw.text((MARGIN, y), line, font=font_i, fill=note.color or (40, 40, 40))
+                y += s(40)
+            y += s(14)
+
         # Tables (one per unit system requested)
         targets = {"Inches": ["in"], "Centimetres": ["cm"], "Both": ["in", "cm"]}[self.units]
         for table in self.chart.tables:
@@ -341,13 +398,12 @@ class ChartRenderer:
                 y += s(40)
 
         # Notes / footer
-        if self.chart.notes:
-            font_n = _Fonts.get(s(28))
-            for note in self.chart.notes:
-                for line in _wrap(draw, note, font_n, content_w):
-                    w = _text_width(draw, line, font_n)
-                    draw.text(((size - w) // 2, y), line, font=font_n, fill=(60, 60, 60))
-                    y += s(38)
+        for note in self.chart.notes:
+            font_n = _Fonts.get(s(28), bold=False)
+            for line in _wrap(draw, note.text, font_n, content_w):
+                w = _text_width(draw, line, font_n)
+                draw.text(((size - w) // 2, y), line, font=font_n, fill=note.color or (60, 60, 60))
+                y += s(38)
         if y > size - MARGIN // 2:
             fits = False
         return img, fits, y

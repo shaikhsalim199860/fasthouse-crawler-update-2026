@@ -42,7 +42,9 @@ JavaScript, so they are not in the page HTML. The crawler reads the
 **2000 x 2000 PNG** named `ASIN.SIZE-CHART.png` (`-2`, `-3` for products
 with several charts, e.g. bikini top/bottom): heading, measurement diagram,
 "How to Measure" as one step-by-step sentence, the table in inches, cm or
-both, and the footer note. Charts shared by many products are rendered once.
+both, and the notes. Only `Label: instruction` lines become numbered steps -
+other prose (such as the red "All measurements are garment measurements"
+warning) is kept as a note, in its position and colour from the site. Charts shared by many products are rendered once.
 The CSV/Excel output records the status per row (Found / No size chart),
 chart name, sizes, measurements, the How-to-Measure sentence, the diagram
 URL and the theme's fit-guide image URL. Fonts: bundled Inter (OFL) in
