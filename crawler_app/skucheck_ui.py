@@ -14,6 +14,7 @@ import streamlit as st
 from crawler_app.awsio import (
     AwsConfig,
     SkuCheckerClient,
+    detect_newline,
     diff_skus,
     format_skus,
     merge_skus,
@@ -106,6 +107,7 @@ def _render_current_list(client: SkuCheckerClient, key: str):
         return None
 
     current = parse_skus(text)
+    st.session_state["sku_newline"] = detect_newline(text)
     c1, c2, c3 = st.columns(3)
     c1.metric("SKUs in the list", f"{len(current):,}")
     c2.metric("Last updated", meta.last_modified or "unknown")
@@ -183,13 +185,14 @@ def _render_update(client: SkuCheckerClient, key: str, current: Optional[List[st
         st.success("The list in S3 already matches this source - nothing to write.")
         return
 
-    st.download_button("⬇ Preview the file that would be written", data=format_skus(final),
+    ending = st.session_state.get("sku_newline", "\n")
+    st.download_button("⬇ Preview the file that would be written", data=format_skus(final, ending),
                        file_name=key.rsplit("/", 1)[-1], mime="text/plain", on_click="ignore")
 
     if st.button("💾 Write this list to S3", type="primary"):
         try:
             with st.spinner("Writing to S3..."):
-                result = client.update_sku_list(key, final, backup=True)
+                result = client.update_sku_list(key, final, backup=True, newline=ending)
         except Exception as e:  # noqa: BLE001
             st.error(f"Update failed: {e}")
             return

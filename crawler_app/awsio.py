@@ -69,9 +69,19 @@ def parse_skus(text: str) -> List[str]:
     return skus
 
 
-def format_skus(skus: Sequence[str]) -> str:
+def detect_newline(text: str) -> str:
+    """Line ending used by an existing list.
+
+    The live SKUS.txt is CRLF (it has been edited on Windows), and
+    rewriting it as LF would make every line look changed, so the
+    file's own convention is kept.
+    """
+    return "\r\n" if "\r\n" in (text or "") else "\n"
+
+
+def format_skus(skus: Sequence[str], newline: str = "\n") -> str:
     """Render the list back exactly as the Lambda expects to read it."""
-    return "\n".join(skus) + ("\n" if skus else "")
+    return newline.join(skus) + (newline if skus else "")
 
 
 def diff_skus(current: Sequence[str], new: Sequence[str]) -> Dict[str, List[str]]:
@@ -194,25 +204,35 @@ class SkuCheckerClient:
             return prefix.rstrip("/") + "/" + backup_name
         return f"{head}/{BACKUP_FOLDER}/{backup_name}" if head else f"{BACKUP_FOLDER}/{backup_name}"
 
-    def update_sku_list(self, key: str, skus: Sequence[str], backup: bool = True) -> Dict:
+    def update_sku_list(
+        self,
+        key: str,
+        skus: Sequence[str],
+        backup: bool = True,
+        newline: Optional[str] = None,
+    ) -> Dict:
         """Write the list, keeping a timestamped copy of what was there.
 
         The backup is best-effort: a missing current file (first run) is not
         an error, but a failure to *write* the backup aborts the update so a
-        good list is never replaced without a copy.
+        good list is never replaced without a copy. `newline` defaults to
+        whatever the current file uses, so only the SKUs change.
         """
         result: Dict = {"key": key, "count": len(skus), "backup_key": None}
-        if backup:
-            try:
-                previous, _ = self.read_text(key)
-            except Exception as e:  # noqa: BLE001 - no current file is fine
-                log.info("No current SKU list to back up at %s (%s)", key, e)
-                previous = None
-            if previous is not None:
-                backup_key = self.backup_key_for(key)
-                self.write_text(backup_key, previous)
-                result["backup_key"] = backup_key
-        self.write_text(key, format_skus(skus))
+        try:
+            previous, _ = self.read_text(key)
+        except Exception as e:  # noqa: BLE001 - no current file is fine
+            log.info("No current SKU list at %s (%s)", key, e)
+            previous = None
+
+        if backup and previous is not None:
+            backup_key = self.backup_key_for(key)
+            self.write_text(backup_key, previous)
+            result["backup_key"] = backup_key
+
+        ending = newline or (detect_newline(previous) if previous is not None else "\n")
+        result["newline"] = "CRLF" if ending == "\r\n" else "LF"
+        self.write_text(key, format_skus(skus, ending))
         return result
 
     # -- Lambda --------------------------------------------------------
