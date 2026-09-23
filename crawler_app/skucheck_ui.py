@@ -6,6 +6,7 @@ touched - this only changes how the list gets updated and adds a manual
 run.
 """
 import logging
+from datetime import time as dt_time
 from typing import List, Optional
 
 import pandas as pd
@@ -21,8 +22,39 @@ from crawler_app.awsio import (
     parse_skus,
 )
 from crawler_app.jobs import REGISTRY
+from crawler_app.schedule import (
+    DAY_LABELS,
+    DAY_NAMES,
+    Schedule,
+    ScheduleClient,
+    build_weekly_cron,
+    describe_expression,
+    next_runs,
+    parse_weekly_cron,
+)
 
 log = logging.getLogger(__name__)
+
+SCHEDULE_POLICY = """{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadAndEditTheSkuCheckerSchedule",
+      "Effect": "Allow",
+      "Action": [
+        "events:ListRuleNamesByTarget",
+        "events:DescribeRule",
+        "events:PutRule",
+        "events:EnableRule",
+        "events:DisableRule",
+        "scheduler:ListSchedules",
+        "scheduler:GetSchedule",
+        "scheduler:UpdateSchedule"
+      ],
+      "Resource": "*"
+    }
+  ]
+}"""
 
 SKU_COLUMNS = ("Seller SKU", "SKU", "Seller-SKU", "seller sku")
 
@@ -255,6 +287,123 @@ def _render_results(client: SkuCheckerClient, config: AwsConfig) -> None:
         st.code(text[:20000], language="text")
 
 
+# ---------------------------------------------------------------- schedule
+
+@st.cache_resource(show_spinner=False)
+def _schedule_client(region: str, lambda_arn: str, key_id: str, secret: str) -> ScheduleClient:
+    return ScheduleClient(region=region, lambda_arn=lambda_arn,
+                          access_key_id=key_id, secret_access_key=secret)
+
+
+def get_schedule_client(config: AwsConfig) -> ScheduleClient:
+    return _schedule_client(config.region, config.lambda_arn,
+                            config.access_key_id, config.secret_access_key)
+
+
+def _schedule_summary(sched: Schedule) -> str:
+    state = "enabled" if sched.enabled else "DISABLED"
+    return f"{describe_expression(sched.expression, sched.timezone)} - {state}"
+
+
+def _render_schedule(config: AwsConfig) -> None:
+    st.markdown("#### Schedule")
+    st.caption("When AWS runs the checker on its own. Changing this edits the live "
+               "EventBridge schedule; the manual run above is unaffected.")
+
+    client = get_schedule_client(config)
+
+    if st.button("Load schedule", key="load_schedule") or "schedules" not in st.session_state:
+        with st.spinner("Looking for schedules that target the function..."):
+            try:
+                st.session_state["schedules"] = client.find_schedules()
+            except Exception as e:  # noqa: BLE001
+                st.session_state["schedules"] = []
+                st.error(f"Could not read schedules: {e}")
+
+    schedules = st.session_state.get("schedules") or []
+    if not schedules:
+        st.info("No schedule found for this function. Either the IAM user cannot read "
+                "EventBridge yet, or the Monday/Friday run is set up another way.")
+        with st.expander("Permissions needed to manage the schedule"):
+            st.code(SCHEDULE_POLICY, language="json")
+        return
+
+    sched = schedules[0]
+    if len(schedules) > 1:
+        sched = st.selectbox("Schedule", schedules,
+                             format_func=lambda s: f"{s.name} ({s.service}) - {_schedule_summary(s)}")
+
+    service_label = "EventBridge rule" if sched.service == "rule" else "EventBridge Scheduler"
+    st.markdown(f"**{sched.name}** · {service_label}")
+    c1, c2 = st.columns([2, 1])
+    c1.metric("Runs", describe_expression(sched.expression, sched.timezone))
+    c2.metric("State", "Enabled" if sched.enabled else "Disabled")
+    st.caption(f"Expression: `{sched.expression}`")
+
+    upcoming = next_runs(sched.expression, sched.timezone, count=4)
+    if upcoming and sched.enabled:
+        st.caption("Next runs: " + ", ".join(r.strftime("%a %d %b %H:%M") for r in upcoming)
+                   + f" ({sched.timezone})")
+
+    # ---- editor ----
+    parsed = parse_weekly_cron(sched.expression)
+    if parsed is None:
+        st.warning("This schedule uses an expression this app does not edit "
+                   f"(`{sched.expression}`). Change it in the AWS console to avoid breaking it.")
+    else:
+        current_days, hour, minute = parsed
+        with st.form("schedule_form"):
+            days = st.multiselect("Days", DAY_NAMES, default=current_days,
+                                  format_func=lambda d: DAY_LABELS[d])
+            col_a, col_b = st.columns(2)
+            new_time = col_a.time_input("Time", value=dt_time(hour=hour, minute=minute), step=300)
+            if sched.supports_timezone:
+                timezone = col_b.text_input("Timezone", value=sched.timezone,
+                                            help="IANA name, e.g. America/Los_Angeles or UTC.")
+            else:
+                timezone = "UTC"
+                col_b.text_input("Timezone", value="UTC", disabled=True,
+                                 help="EventBridge rules always run in UTC.")
+            confirm = st.checkbox("I understand this changes the live schedule")
+            submitted = st.form_submit_button("Save schedule", type="primary")
+
+        if submitted:
+            try:
+                expression = build_weekly_cron(days, new_time.hour, new_time.minute)
+            except ValueError as e:
+                st.error(str(e))
+                return
+            if expression == sched.expression and timezone == sched.timezone:
+                st.info("That is already the schedule - nothing to change.")
+                return
+            if not confirm:
+                st.warning("Tick the confirmation box to save.")
+                return
+            try:
+                with st.spinner("Updating the schedule..."):
+                    updated = client.update_expression(sched, expression, timezone)
+            except Exception as e:  # noqa: BLE001
+                st.error(f"Could not update the schedule: {e}")
+                return
+            st.session_state["schedules"] = [updated] + [s for s in schedules if s.name != updated.name]
+            st.success(f"Now runs {describe_expression(updated.expression, updated.timezone)}.")
+            preview = next_runs(updated.expression, updated.timezone, count=3)
+            if preview:
+                st.caption("Next runs: " + ", ".join(r.strftime("%a %d %b %H:%M") for r in preview))
+
+    # ---- pause / resume ----
+    label = "Pause the schedule" if sched.enabled else "Resume the schedule"
+    if st.button(label, key="toggle_schedule"):
+        try:
+            with st.spinner("Updating..."):
+                updated = client.set_enabled(sched, not sched.enabled)
+        except Exception as e:  # noqa: BLE001
+            st.error(f"Could not change the state: {e}")
+            return
+        st.session_state["schedules"] = [updated] + [s for s in schedules if s.name != updated.name]
+        st.success("Schedule " + ("enabled." if updated.enabled else "paused - it will not run on its own."))
+
+
 def render() -> None:
     """Draw the whole SKU checker tab."""
     st.subheader("Fasthouse SKU checker")
@@ -301,5 +450,8 @@ def render() -> None:
 
     st.divider()
     _render_run(client, config)
+
+    st.divider()
+    _render_schedule(config)
 
     _render_results(client, config)

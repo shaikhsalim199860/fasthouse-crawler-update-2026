@@ -65,6 +65,13 @@ function on demand. The EventBridge schedule (Mon/Fri) is untouched.
   outside the folder the Lambda reads, so an old copy can never be mistaken
   for input.
 - **Run SKU checker** invokes the Lambda and shows its response.
+- **Schedule** shows when AWS runs the checker by itself, and lets the days,
+  time and (for EventBridge Scheduler) timezone be changed, or the schedule
+  paused and resumed. Both EventBridge **Rules** and **Scheduler** are
+  supported and auto-detected from the function ARN. Saving requires an
+  explicit confirmation, and an expression the app does not model (rates,
+  ranges, step values) is shown read-only rather than rewritten.
+  This needs the extra IAM permissions listed in the app.
 - Lists the newest files under `results_prefix` so a run's output can be
   opened or downloaded.
 
@@ -89,6 +96,7 @@ The IAM user needs `s3:GetObject`/`s3:PutObject` on the SKU key and its
 | `fasthouse/scrape.py`, `seven/scrape.py` | Site-specific parsing |
 | `fasthouse/sizechart.py` | Kiwi Sizing extraction + 2000x2000 size chart renderer |
 | `crawler_app/awsio.py` / `skucheck_ui.py` | S3 SKU list + Lambda invoke, and the SKU checker UI |
+| `crawler_app/schedule.py` | Reads/edits the EventBridge schedule that fires the checker |
 
 ## Downloads: one ZIP or split parts
 
