@@ -25,9 +25,11 @@ in the *Failed rows* table and the `Crawl Error` / `Image Errors` columns.
 Amazon fetches listing images by URL, and what it needs is not the Shopify
 original but the crawler's processed version (RGB, centre-cropped square,
 1600 x 1600, JPEG q95 4:4:4). With `images_bucket` set in secrets, a
-finished image crawl publishes those files to S3 and adds Amazon flat-file
-columns to the output: `main_image_url` and `other_image_url1`-`8`, plus
-`Size Chart URL`.
+finished image crawl publishes those files to S3 and **replaces the URLs in
+the `main` / `pt01`-`pt08` columns** with the hosted ones, since those are
+what Amazon should fetch. A `Size Chart URL` column is added for reference.
+A slot with no hosted image - upload failed, or hosting off - keeps
+whatever it had, so nothing is lost.
 
 Keys are the image's **content hash**, which does two things:
 

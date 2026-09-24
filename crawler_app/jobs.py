@@ -19,7 +19,7 @@ from typing import Callable, Deque, Dict, List, Optional
 import pandas as pd
 
 from crawler_app.archive import DEFAULT_PART_BYTES, build_zip_parts, remove_matching
-from crawler_app.imagehost import HostConfig, ImageHost, add_hosted_columns
+from crawler_app.imagehost import HostConfig, ImageHost, apply_hosted_urls
 
 log = logging.getLogger(__name__)
 
@@ -182,6 +182,7 @@ class JobRegistry:
         part_bytes: Optional[int] = DEFAULT_PART_BYTES,
         options: Optional[Dict] = None,
         host_config: Optional[HostConfig] = None,
+        host_url_mode: str = "replace",
     ) -> Job:
         with self._lock:
             if self.current is not None and self.current.is_active:
@@ -208,6 +209,7 @@ class JobRegistry:
                 downloads_dir=Path(downloads_dir),
                 part_bytes=part_bytes,
                 host_config=host_config,
+                host_url_mode=host_url_mode,
             ),
             name=f"crawl-{job.id}",
             daemon=True,
@@ -241,6 +243,7 @@ def _run_job(
     downloads_dir: Path,
     part_bytes: Optional[int],
     host_config: Optional[HostConfig] = None,
+    host_url_mode: str = "replace",
 ) -> None:
     try:
         job.status = "running"
@@ -287,7 +290,9 @@ def _run_job(
                 "errors": upload.errors[:20], "bucket": host_config.bucket,
             }
             if upload.urls:
-                out = add_hosted_columns(out, upload.urls)
+                # The image columns now hold the URL Amazon should fetch,
+                # not the Shopify original they were downloaded from.
+                out = apply_hosted_urls(out, upload.urls, mode=host_url_mode)
             job._log(f"Uploaded {upload.uploaded} new image(s), "
                      f"{upload.skipped} already hosted, {upload.failed} failed")
 

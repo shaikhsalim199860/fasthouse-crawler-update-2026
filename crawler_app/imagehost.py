@@ -217,12 +217,21 @@ class ImageHost:
         return result
 
 
-def add_hosted_columns(df, urls: Dict[str, str], asin_column: str = "ASIN",
-                       fallback_column: str = "Seller SKU"):
-    """Add Amazon flat-file image URL columns from the upload mapping.
+def apply_hosted_urls(df, urls: Dict[str, str], mode: str = "replace",
+                      asin_column: str = "ASIN", fallback_column: str = "Seller SKU"):
+    """Put the hosted URLs into the output.
 
-    `main` becomes `main_image_url`, `pt01`-`pt08` become
-    `other_image_url1`-`8`, so the sheet can be pasted into the template.
+    mode="replace" (default) overwrites the `main` / `pt01`-`pt08` columns,
+    which held the Shopify source URL, with the URL of the image actually
+    uploaded - those are what goes to Amazon, and the source URL points at
+    a different (1200px, differently encoded) picture.
+
+    mode="flatfile" instead adds Amazon's own column names
+    (`main_image_url`, `other_image_url1`-`8`) and leaves the source URLs
+    alone.
+
+    A slot with no hosted URL - upload failed, or hosting was off - keeps
+    whatever was there, so nothing is silently lost.
     """
     by_asin: Dict[str, Dict[str, str]] = {}
     for name, url in urls.items():
@@ -239,22 +248,42 @@ def add_hosted_columns(df, urls: Dict[str, str], asin_column: str = "ASIN",
         return str(value).strip()
 
     records = df.to_dict("records")
-    columns: Dict[str, List[str]] = {column: [] for column in FLAT_FILE_COLUMNS.values()}
+    hosted_flags: List[bool] = []
     chart_urls: List[str] = []
+    columns: Dict[str, List[str]] = {}
+
     for row in records:
         slots = by_asin.get(key_of(row), {})
-        for slot, column in FLAT_FILE_COLUMNS.items():
-            columns[column].append(slots.get(slot, ""))
+        hosted_flags.append(bool(slots))
+        for slot, flat_column in FLAT_FILE_COLUMNS.items():
+            target = slot if mode == "replace" else flat_column
+            existing = row.get(slot if mode == "replace" else flat_column, "")
+            value = slots.get(slot) or ("" if mode == "flatfile" else existing)
+            columns.setdefault(target, []).append("" if value is None else value)
+
         charts = [url for slot, url in sorted(slots.items()) if "size-chart" in slot]
-        # In Images mode the chart occupies a pt slot; repeat it here for reference.
         chart_slot = str(row.get("Size Chart Slot") or "").split(" | ")[0].lower()
-        if not charts and chart_slot.startswith("pt"):
-            charts = [slots.get(chart_slot, "")] if slots.get(chart_slot) else []
+        if not charts and chart_slot.startswith("pt") and slots.get(chart_slot):
+            charts = [slots[chart_slot]]
         chart_urls.append(" | ".join(u for u in charts if u))
 
     for column, values in columns.items():
-        if any(values):
+        # Do not invent empty slot columns the crawl never produced.
+        if any(values) or column in df.columns:
             df[column] = values
     if any(chart_urls):
         df["Size Chart URL"] = chart_urls
+    if any(hosted_flags) and not all(hosted_flags):
+        df["Images Hosted"] = hosted_flags
     return df
+
+
+def add_hosted_columns(df, urls: Dict[str, str], asin_column: str = "ASIN",
+                       fallback_column: str = "Seller SKU"):
+    """Add Amazon flat-file image URL columns from the upload mapping.
+
+    Kept for callers that want Amazon's own column names; equivalent to
+    apply_hosted_urls(..., mode="flatfile").
+    """
+    return apply_hosted_urls(df, urls, mode="flatfile",
+                             asin_column=asin_column, fallback_column=fallback_column)
