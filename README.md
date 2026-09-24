@@ -20,6 +20,29 @@ request. Rows that fail or lose an image to a transient stall are retried
 once, sequentially, after the main pass; anything still failing is listed
 in the *Failed rows* table and the `Crawl Error` / `Image Errors` columns.
 
+## Hosting images for Amazon
+
+Amazon fetches listing images by URL, and what it needs is not the Shopify
+original but the crawler's processed version (RGB, centre-cropped square,
+1600 x 1600, JPEG q95 4:4:4). With `images_bucket` set in secrets, a
+finished image crawl publishes those files to S3 and adds Amazon flat-file
+columns to the output: `main_image_url` and `other_image_url1`-`8`, plus
+`Size Chart URL`.
+
+Keys are the image's **content hash**, which does two things:
+
+- The six size variants of a product share byte-identical images, and a
+  size chart is shared across its whole sizing group. In a real 135-ASIN
+  batch, 1,159 files on disk are only **163 distinct images** - each is
+  uploaded once and every row points at the same URL.
+- Amazon ingests a URL once and caches it, so a corrected image **must**
+  get a new URL or the listing keeps the old picture. The hash changes
+  exactly when the image does. A re-run of an unchanged batch uploads
+  nothing.
+
+The bucket needs public `s3:GetObject` and must use SSE-S3, not SSE-KMS -
+anonymous readers cannot decrypt KMS-encrypted objects.
+
 ## Reviewing a finished crawl
 
 The results screen is built for checking the output before it goes near
@@ -139,6 +162,7 @@ The IAM user needs `s3:GetObject`/`s3:PutObject` on the SKU key and its
 | `fasthouse/sizechart.py` | Kiwi Sizing extraction + 2000x2000 size chart renderer |
 | `fasthouse/catalog.py` | SKU -> product URL index built from the Fasthouse catalogue |
 | `crawler_app/review.py` | Results review: asset thumbnails, issue filter, build version |
+| `crawler_app/imagehost.py` | Content-addressed S3 upload + Amazon flat-file URL columns |
 | `crawler_app/awsio.py` / `skucheck_ui.py` | S3 SKU list + Lambda invoke, and the SKU checker UI |
 | `crawler_app/schedule.py` | Reads/edits the EventBridge schedule that fires the checker |
 

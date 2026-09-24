@@ -6,7 +6,11 @@ from PIL import Image
 
 log = logging.getLogger(__name__)
 
-SQUARE_SIZE = 1500
+# Amazon accepts 1000px+ for zoom and recommends 1600px on the longest
+# side. Fasthouse's masters are 1200px, so anything above that is
+# interpolation either way - landing on the recommended number costs
+# nothing real and keeps listing audits quiet.
+SQUARE_SIZE = 1600
 
 
 def to_rgb(img: Image.Image) -> Image.Image:

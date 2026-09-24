@@ -9,6 +9,7 @@ from PIL import Image
 
 from crawler_app.archive import MB
 from crawler_app.bigfiles import raise_static_file_limit
+from crawler_app.imagehost import HostConfig
 from crawler_app import skucheck_ui
 from crawler_app.jobs import IMAGE_CRAWL_TYPES, REGISTRY, Job
 from crawler_app.review import build_version, group_assets, issue_report, thumbnail_bytes
@@ -42,6 +43,25 @@ def _enable_big_downloads() -> bool:
 
 
 BIG_DOWNLOADS = _enable_big_downloads()
+
+
+def host_config() -> HostConfig:
+    """Where crawled images are published, from the [aws] secrets block."""
+    try:
+        raw = dict(st.secrets.get("aws", {}))
+    except Exception:  # noqa: BLE001 - no secrets file
+        raw = {}
+    return HostConfig(
+        bucket=str(raw.get("images_bucket", "")).strip(),
+        region=str(raw.get("region", "us-east-1")).strip() or "us-east-1",
+        prefix=str(raw.get("images_prefix", "")).strip(),
+        public_base_url=str(raw.get("images_public_base", "")).strip(),
+        access_key_id=str(raw.get("access_key_id", "")).strip(),
+        secret_access_key=str(raw.get("secret_access_key", "")).strip(),
+    )
+
+
+HOST = host_config()
 
 CRAWLERS = {"Fasthouse": fetch_text_and_images, "Seven": seven_start}
 
@@ -234,6 +254,14 @@ with st.sidebar:
             help="Serves the whole batch as a single archive, streamed from disk. "
                  "Untick to split it into smaller parts, which is safer on a flaky connection.",
         )
+        upload_images = False
+        if HOST.enabled:
+            upload_images = st.checkbox(
+                "Publish images to S3", value=True,
+                help=f"Uploads the crawled images to `{HOST.bucket}` and adds Amazon "
+                     "flat-file URL columns (main_image_url, other_image_url1 ...) to the "
+                     "output. Identical images upload once and are reused, so re-runs are quick.",
+            )
         part_mb = 150
         if not single_zip:
             part_mb = st.slider(
@@ -274,6 +302,8 @@ the gallery down; the standalone *Size Charts* mode renders charts only.
         st.caption("Static file serving is off - ZIP parts are served through download buttons one part at a time.")
     elif not BIG_DOWNLOADS:
         st.caption("This Streamlit version caps served files at 200 MB, so large batches are still split into parts.")
+    if not HOST.enabled:
+        st.caption("Image hosting is off - add `images_bucket` to secrets to publish crawled images.")
 
     build = version_info()
     if build.get("commit"):
@@ -396,6 +426,7 @@ if run_clicked and df is not None:
             outputs_dir=OUTPUTS_DIR,
             downloads_dir=DOWNLOADS_DIR,
             part_bytes=None if single_zip else part_mb * MB,
+            host_config=HOST if upload_images else None,
             options=(
                 {"units": units} if crawl_type == "Size Charts"
                 else {"units": units, "include_size_chart": True} if include_size_chart
@@ -548,6 +579,7 @@ if job.failures:
                         crawler=CRAWLERS[job.website], workers=job.workers,
                         assets_dir=ASSETS_DIR, outputs_dir=OUTPUTS_DIR,
                         downloads_dir=DOWNLOADS_DIR, part_bytes=None if single_zip else part_mb * MB,
+                        host_config=HOST if upload_images else None,
                         options=job.options,
                     )
                     st.rerun()
@@ -614,6 +646,23 @@ if out is not None:
                                  caption=f"{(slot or '?').upper()} · {path.suffix.lstrip('.')}")
                     except Exception as e:  # noqa: BLE001 - one bad file must not break the page
                         st.caption(f"{slot}: could not preview ({e})")
+
+if job.upload:
+    up = job.upload
+    st.markdown("#### Hosted images")
+    u1, u2, u3, u4 = st.columns(4)
+    u1.metric("Uploaded", f"{up['uploaded']:,}")
+    u2.metric("Already hosted", f"{up['skipped']:,}",
+              help="Identical images were published by an earlier run, so they were reused.")
+    u3.metric("Failed", f"{up['failed']:,}")
+    u4.metric("Sent", fmt_size(up["bytes"]))
+    if up["failed"]:
+        st.error(f"{up['failed']} image(s) failed to upload - those rows have no hosted URL.")
+        with st.expander("Upload errors"):
+            st.code("\n".join(up["errors"]), language="text")
+    else:
+        st.success(f"Images are live in `{up['bucket']}`. The CSV has "
+                   "`main_image_url` and `other_image_url1`-`8` ready for the flat file.")
 
 st.markdown("#### Downloads")
 dl_cols = st.columns([1, 1, 2])

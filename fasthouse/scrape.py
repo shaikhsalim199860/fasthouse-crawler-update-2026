@@ -526,7 +526,7 @@ class FasthouseScraper(BaseScraper):
         return f"{self.assets_folder}/{img_name}"
 
     def _download_square_1500(self, url: str, img_name: str, folderize: bool) -> Image.Image:
-        """Download -> RGB -> centre-crop -> 1500x1500 -> save, in ONE pass.
+        """Download -> RGB -> centre-crop -> square -> save, in ONE pass.
 
         The old flow saved the raw download, re-opened it from disk,
         cropped/resized and saved again (double decode + double write per

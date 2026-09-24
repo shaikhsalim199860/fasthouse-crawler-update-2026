@@ -19,6 +19,7 @@ from typing import Callable, Deque, Dict, List, Optional
 import pandas as pd
 
 from crawler_app.archive import DEFAULT_PART_BYTES, build_zip_parts, remove_matching
+from crawler_app.imagehost import HostConfig, ImageHost, add_hosted_columns
 
 log = logging.getLogger(__name__)
 
@@ -61,6 +62,7 @@ class Job:
     source_df: Optional[pd.DataFrame] = None
     csv_path: Optional[Path] = None
     xlsx_path: Optional[Path] = None
+    upload: Optional[dict] = None
     zip_parts: List[Path] = field(default_factory=list)
     options: Dict = field(default_factory=dict)
     cancel_event: threading.Event = field(default_factory=threading.Event)
@@ -179,6 +181,7 @@ class JobRegistry:
         downloads_dir: Path,
         part_bytes: Optional[int] = DEFAULT_PART_BYTES,
         options: Optional[Dict] = None,
+        host_config: Optional[HostConfig] = None,
     ) -> Job:
         with self._lock:
             if self.current is not None and self.current.is_active:
@@ -204,6 +207,7 @@ class JobRegistry:
                 outputs_dir=Path(outputs_dir),
                 downloads_dir=Path(downloads_dir),
                 part_bytes=part_bytes,
+                host_config=host_config,
             ),
             name=f"crawl-{job.id}",
             daemon=True,
@@ -236,6 +240,7 @@ def _run_job(
     outputs_dir: Path,
     downloads_dir: Path,
     part_bytes: Optional[int],
+    host_config: Optional[HostConfig] = None,
 ) -> None:
     try:
         job.status = "running"
@@ -264,6 +269,27 @@ def _run_job(
         if "Crawl Error" in out.columns and not out["Crawl Error"].astype(str).str.strip().any():
             out = out.drop(columns=["Crawl Error"])
         job.result_df = out
+
+        # Publish the images before the CSV is written, so the hosted URLs
+        # are in the sheet that gets downloaded.
+        if host_config is not None and host_config.enabled and job.is_image_job:
+            job.stage = "Uploading images"
+            job._log("Publishing images to S3...")
+            host = ImageHost(host_config)
+
+            def on_upload(done: int, total: int) -> None:
+                job.stage = f"Uploading images ({done}/{total})"
+
+            upload = host.upload_assets(assets_dir, on_progress=on_upload)
+            job.upload = {
+                "uploaded": upload.uploaded, "skipped": upload.skipped,
+                "failed": upload.failed, "bytes": upload.bytes_uploaded,
+                "errors": upload.errors[:20], "bucket": host_config.bucket,
+            }
+            if upload.urls:
+                out = add_hosted_columns(out, upload.urls)
+            job._log(f"Uploaded {upload.uploaded} new image(s), "
+                     f"{upload.skipped} already hosted, {upload.failed} failed")
 
         job.stage = "Writing CSV / Excel"
         suffix = CSV_SUFFIX.get(job.crawl_type, "images")
