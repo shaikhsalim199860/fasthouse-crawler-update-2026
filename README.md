@@ -5,8 +5,10 @@
 ## Usage
 
 1. Pick the website and crawl type in the sidebar (Data / Images / A+ Images / Size Charts).
-2. Upload a CSV with `Seller SKU`, `URL` and (Fasthouse Data mode only) `No of bullets`.
-   An optional `ASIN` column is used to name image files.
+2. Upload a CSV with `Seller SKU` and (Fasthouse Data mode only)
+   `No of bullets`. For Fasthouse the `URL` column is optional - product
+   URLs are looked up from the Seller SKU (see below). An optional `ASIN`
+   column is used to name image files.
 3. Press **Run scraper**. The crawl runs in a background thread on the server:
    you can refresh or close the tab and the progress/downloads are still there
    when you come back.
@@ -17,6 +19,24 @@ result (and their own ASIN-named copies of the files) without another
 request. Rows that fail or lose an image to a transient stall are retried
 once, sequentially, after the main pass; anything still failing is listed
 in the *Failed rows* table and the `Crawl Error` / `Image Errors` columns.
+
+## Crawling from a SKU list (Fasthouse)
+
+Fasthouse publishes its catalogue at `/products.json`, and every variant
+carries the same SKU used in the Amazon feed (`400013-01-07`). The crawler
+indexes those once per run - about 5,300 SKUs across 1,100 products, five
+requests - so a file exported from Amazon (`Seller SKU`, `Item
+Description`, `ASIN`, no URL) can be crawled directly in any mode.
+
+Rows that already have a URL are left alone, so a mixed file works too.
+SKUs that are not in the catalogue are reported as
+`Not found on fasthouse.com` and skipped rather than failing as a network
+error, which doubles as a check for discontinued SKUs.
+
+The **SKU Lookup** crawl type does only the resolution - no product pages
+are fetched, so it is quick - and adds `URL`, `SKU Status`,
+`Matched Product`, `Variant`, `Available` and `Catalogue Price` to the
+output.
 
 ## Size chart as PT05 (Fasthouse Images mode)
 
@@ -100,6 +120,7 @@ The IAM user needs `s3:GetObject`/`s3:PutObject` on the SKU key and its
 | `crawler_app/netutil.py` / `images.py` | Pooled HTTP session with timeouts + retries; image helpers |
 | `fasthouse/scrape.py`, `seven/scrape.py` | Site-specific parsing |
 | `fasthouse/sizechart.py` | Kiwi Sizing extraction + 2000x2000 size chart renderer |
+| `fasthouse/catalog.py` | SKU -> product URL index built from the Fasthouse catalogue |
 | `crawler_app/awsio.py` / `skucheck_ui.py` | S3 SKU list + Lambda invoke, and the SKU checker UI |
 | `crawler_app/schedule.py` | Reads/edits the EventBridge schedule that fires the checker |
 

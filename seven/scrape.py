@@ -235,6 +235,9 @@ def start(
     input_columns = list(df.columns)
 
     def process(index: int, row: dict, s: SevenScraper) -> dict:
+        if not str(row.get("URL") or "").strip():
+            return {"status": "error", "message": "no URL for this row"}
+
         resp = s.make_soup_obj(row["URL"])
 
         if resp is None:

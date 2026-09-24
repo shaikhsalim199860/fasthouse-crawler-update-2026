@@ -64,8 +64,10 @@ st.set_page_config(
 # -----------------------
 
 def required_columns(website: str, crawl_type: str) -> List[str]:
-    if website == "Fasthouse" and crawl_type == "Data":
-        return ["Seller SKU", "URL", "No of bullets"]
+    # Fasthouse product URLs can be looked up from the Seller SKU, so a
+    # file exported from Amazon (SKU + ASIN, no URL) is accepted as is.
+    if website == "Fasthouse":
+        return ["Seller SKU", "No of bullets"] if crawl_type == "Data" else ["Seller SKU"]
     return ["Seller SKU", "URL"]
 
 
@@ -109,13 +111,18 @@ def validate(df: pd.DataFrame, website: str, crawl_type: str):
     if problems:
         return problems, warnings
 
-    urls = df["URL"].astype(str).str.strip()
-    blank_urls = int((df["URL"].isna() | (urls == "") | (urls.str.lower() == "nan")).sum())
-    if blank_urls:
-        problems.append(f"{blank_urls} row(s) have an empty URL.")
-    bad_urls = int((~urls.str.lower().str.startswith(("http://", "https://")) & (urls != "")).sum())
-    if bad_urls:
-        warnings.append(f"{bad_urls} URL(s) do not start with http(s):// and will fail to fetch.")
+    if "URL" not in df.columns:
+        warnings.append("No **URL** column - product URLs will be looked up from the Seller SKU.")
+    else:
+        urls = df["URL"].astype(str).str.strip()
+        blank_urls = int((df["URL"].isna() | (urls == "") | (urls.str.lower() == "nan")).sum())
+        if blank_urls and website == "Fasthouse":
+            warnings.append(f"{blank_urls} row(s) have no URL - it will be looked up from the Seller SKU.")
+        elif blank_urls:
+            problems.append(f"{blank_urls} row(s) have an empty URL.")
+        bad_urls = int((~urls.str.lower().str.startswith(("http://", "https://")) & (urls != "")).sum())
+        if bad_urls:
+            warnings.append(f"{bad_urls} URL(s) do not start with http(s):// and will fail to fetch.")
 
     dup = int(df["Seller SKU"].duplicated().sum())
     if dup:
@@ -155,7 +162,7 @@ with st.sidebar:
 
     crawl_options = ["Data", "Images"]
     if website == "Fasthouse":
-        crawl_options += ["A+ Images", "Size Charts"]
+        crawl_options += ["A+ Images", "Size Charts", "SKU Lookup"]
     crawl_type = st.radio("Crawling type", crawl_options)
 
     units = "Inches"
@@ -214,7 +221,19 @@ with st.sidebar:
 - `No of bullets` *(Fasthouse - Data mode only)*
 
 **Optional**
+- `URL` - looked up from the Seller SKU for Fasthouse when missing
 - `ASIN` - used to name image files in the image modes
+            """
+        )
+    with st.expander("About SKU Lookup", expanded=False):
+        st.markdown(
+            """
+Turns a Seller SKU list into product URLs using Fasthouse's own catalogue
+(~5,300 SKUs), without fetching any product page - so it is quick and is
+also a way to check which SKUs are still listed, and which are in stock.
+
+Every other Fasthouse mode does this automatically when the file has no
+`URL` column, so an Amazon export (SKU + ASIN) can be crawled directly.
             """
         )
     with st.expander("About Size Charts mode", expanded=False):
@@ -273,7 +292,7 @@ if uploaded_file is not None:
 if df is not None:
     problems, warnings = validate(df, website, crawl_type)
 
-    unique_urls = int(df["URL"].astype(str).str.strip().str.lower().nunique()) if "URL" in df.columns else len(df)
+    unique_urls = int(df["URL"].astype(str).str.strip().str.lower().nunique()) if "URL" in df.columns else 0
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Rows", f"{len(df):,}")
     m2.metric("Unique URLs", f"{unique_urls:,}", help="Each URL is crawled once; size-variant rows sharing a URL reuse the result.")
@@ -428,6 +447,15 @@ if out is not None:
         mismatch = int((out["Bullet match"] == False).sum())  # noqa: E712
         if mismatch:
             flags.append(f"{mismatch} row(s) where the captured bullet count differs from 'No of bullets'")
+    if "SKU Status" in out.columns:
+        missing_skus = int((out["SKU Status"] == "Not found on fasthouse.com").sum())
+        if missing_skus:
+            flags.append(f"{missing_skus} SKU(s) are not in the Fasthouse catalogue - "
+                         "they were skipped (see the 'SKU Status' column)")
+        if "Available" in out.columns:
+            sold_out = int((out["Available"] == False).sum())  # noqa: E712
+            if sold_out:
+                flags.append(f"{sold_out} SKU(s) are currently out of stock on fasthouse.com")
     if "Size Chart Status" in out.columns:
         missing = int(out["Size Chart Status"].astype(str).str.startswith("No size chart").sum())
         if missing:

@@ -27,10 +27,12 @@ MODE_BY_CRAWL_TYPE = {
     "Images": "fetch_images",
     "A+ Images": "A_Plus_fetch_images",
     "Size Charts": "fetch_size_charts",
+    "SKU Lookup": "sku_lookup",
 }
 # Crawl types whose output is a folder of files delivered as ZIP parts.
 IMAGE_CRAWL_TYPES = {"Images", "A+ Images", "Size Charts"}
-CSV_SUFFIX = {"Data": "data", "Images": "images", "A+ Images": "images", "Size Charts": "sizecharts"}
+CSV_SUFFIX = {"Data": "data", "Images": "images", "A+ Images": "images",
+              "Size Charts": "sizecharts", "SKU Lookup": "skulookup"}
 
 ACTIVE_STATUSES = {"queued", "running", "packaging"}
 

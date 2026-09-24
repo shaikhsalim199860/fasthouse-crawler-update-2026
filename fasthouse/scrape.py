@@ -29,6 +29,7 @@ from crawler_app.runner import (
     run_rows,
     streamlit_progress_callback,
 )
+from fasthouse.catalog import get_sku_index, resolve_dataframe
 from fasthouse.sizechart import SizeChartCache, fetch_size_charts, parse_kiwi_data
 
 log = logging.getLogger(__name__)
@@ -904,6 +905,7 @@ class RunType(enum.Enum):
     fetch_images = "fetch_images"
     A_Plus_fetch_images="A_Plus_fetch_images"
     fetch_size_charts = "fetch_size_charts"
+    sku_lookup = "sku_lookup"
 
 
 def _max_bullets(df: pd.DataFrame) -> int:
@@ -912,6 +914,29 @@ def _max_bullets(df: pd.DataFrame) -> int:
     values = pd.to_numeric(df["No of bullets"], errors="coerce")
     top = values.max()
     return int(top) if pd.notna(top) and top > 0 else 5
+
+
+def _finish_sku_lookup(df: pd.DataFrame, on_progress, output_dir: Optional[str]) -> pd.DataFrame:
+    """SKU-lookup mode: no pages are fetched, so report each row straight
+    from the resolution result."""
+    from fasthouse.catalog import STATUS_MISSING
+
+    if on_progress:
+        for index, row in enumerate(df.to_dict("records")):
+            found = row.get("SKU Status") != STATUS_MISSING
+            on_progress({
+                "index": index,
+                "sku": str(row.get("Seller SKU") or f"row {index + 1}"),
+                "url": row.get("URL", ""),
+                "status": "ok" if found else "error",
+                "message": (f"{row.get('Matched Product', '')}".strip() or "URL supplied")
+                           if found else STATUS_MISSING,
+            })
+
+    if output_dir:
+        os.makedirs(output_dir, exist_ok=True)
+        df.to_csv(os.path.join(output_dir, "Fasthouse__skulookup.csv"), sep=",", index=False)
+    return df
 
 
 def fetch_text_and_images(
@@ -927,6 +952,7 @@ def fetch_text_and_images(
     units: str = "Inches",
     include_size_chart: bool = False,
     size_chart_slot: int = 5,
+    resolve_skus: bool = True,
 ):
     """Crawl every row of `df` in `mode` (fetch_data / fetch_images /
     A_Plus_fetch_images / fetch_size_charts) and return the enriched DataFrame.
@@ -937,6 +963,7 @@ def fetch_text_and_images(
     output_dir    where the legacy Fasthouse__*.csv is written; None to skip
     progress_bar  legacy flag: draw an st.progress bar (Streamlit thread only)
     units         size charts: "Inches", "Centimetres" or "Both"
+    resolve_skus  look up missing URLs from the Seller SKU (Fasthouse catalogue)
     include_size_chart  images mode: also render the Kiwi size chart into the
                   listing image slot `size_chart_slot` (PT05), or the first
                   free slot after the gallery when that one is taken
@@ -945,6 +972,26 @@ def fetch_text_and_images(
 
     # Check if the mode is acceptable.
     RunType(mode)
+
+    # A file exported from Amazon has SKUs but no URLs. Look them up from
+    # the Fasthouse catalogue so the same file works for every mode, and
+    # so SKUs that have left the site are reported instead of failing as
+    # "could not fetch".
+    needs_urls = "URL" not in df.columns or not df["URL"].astype(str).str.strip().replace("nan", "").any()
+    if mode == RunType.sku_lookup.value or (resolve_skus and needs_urls):
+        lookup_session = make_session()
+        try:
+            index = get_sku_index(lookup_session)
+            df, summary = resolve_dataframe(df, index)
+        finally:
+            lookup_session.close()
+        log.info("SKU lookup: %(resolved)s resolved, %(url_supplied)s already had a URL,"
+                 " %(missing)s not in the catalogue of %(index_size)s SKUs", summary)
+        if on_progress and summary["missing"]:
+            log.warning("SKUs not found: %s", ", ".join(summary["missing_skus"][:20]))
+
+    if mode == RunType.sku_lookup.value:
+        return _finish_sku_lookup(df, on_progress, output_dir)
 
     df = df.astype(object).where(df.notna(), '')
     data = df.to_dict("records")
@@ -962,6 +1009,11 @@ def fetch_text_and_images(
     input_columns = list(df.columns)
 
     def process(index: int, row: dict, scraper: "FasthouseScraper") -> dict:
+        # A SKU the catalogue lookup could not place has no URL to fetch;
+        # say so instead of reporting a meaningless network failure.
+        if not str(row.get("URL") or "").strip():
+            return {"status": "error", "message": str(row.get("SKU Status") or "no URL for this row")}
+
         resp = scraper.make_soup_obj(row["URL"])
         if resp is None:
             reason = scraper.last_fetch_error or "unknown error"
