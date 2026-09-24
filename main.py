@@ -11,6 +11,7 @@ from crawler_app.archive import MB
 from crawler_app.bigfiles import raise_static_file_limit
 from crawler_app import skucheck_ui
 from crawler_app.jobs import IMAGE_CRAWL_TYPES, REGISTRY, Job
+from crawler_app.review import build_version, group_assets, issue_report, thumbnail_bytes
 from crawler_app.runner import MAX_WORKERS
 from fasthouse.scrape import fetch_text_and_images
 from fasthouse.sizechart import UNIT_CHOICES
@@ -53,6 +54,7 @@ DEFAULT_SECONDS_PER_ROW = 2.0
 if not logging.getLogger().handlers:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logging.getLogger("urllib3").setLevel(logging.WARNING)
+log = logging.getLogger(__name__)
 
 st.set_page_config(
     page_title="Fasthouse & Seven Crawler",
@@ -99,6 +101,36 @@ def parse_csv(raw: bytes) -> pd.DataFrame:
 @st.cache_data(show_spinner=False)
 def to_csv_bytes(df: pd.DataFrame) -> bytes:
     return df.to_csv(index=False).encode("utf-8-sig")
+
+
+@st.cache_data(show_spinner=False)
+def thumb(path: str, mtime: float, size: int = 360) -> bytes:
+    """Cached by path+mtime so a re-crawl of the same ASIN refreshes it."""
+    return thumbnail_bytes(Path(path), size)
+
+
+@st.cache_resource(show_spinner=False)
+def version_info() -> dict:
+    return build_version(ROOT)
+
+
+@st.cache_data(show_spinner=False, ttl=900)
+def sku_precheck(raw: bytes) -> Optional[dict]:
+    """Resolve the file's SKUs before a crawl is started, so a missing
+    product is spotted in seconds rather than after a long run."""
+    from crawler_app.netutil import make_session
+    from fasthouse.catalog import get_sku_index, resolve_dataframe
+
+    session = make_session()
+    try:
+        frame = pd.read_csv(io.BytesIO(raw))
+        _, summary = resolve_dataframe(frame, get_sku_index(session))
+        return summary
+    except Exception as e:  # noqa: BLE001 - the crawl will report it properly
+        log.warning("SKU pre-check failed: %s", e)
+        return None
+    finally:
+        session.close()
 
 
 def validate(df: pd.DataFrame, website: str, crawl_type: str):
@@ -215,49 +247,38 @@ with st.sidebar:
             )
 
     st.divider()
-    with st.expander("Input file format", expanded=False):
+    with st.expander("Help", expanded=False):
         st.markdown(
             """
-**Required columns**
-- `Seller SKU`
-- `URL`
-- `No of bullets` *(Fasthouse - Data mode only)*
+**Input columns**
 
-**Optional**
-- `URL` - looked up from the Seller SKU for Fasthouse when missing
-- `ASIN` - used to name image files in the image modes
-            """
-        )
-    with st.expander("About SKU Lookup", expanded=False):
-        st.markdown(
-            """
-Turns a Seller SKU list into product URLs using Fasthouse's own catalogue
-(~5,300 SKUs), without fetching any product page - so it is quick and is
-also a way to check which SKUs are still listed, and which are in stock.
+- `Seller SKU` - required
+- `No of bullets` - required for Fasthouse *Data* mode
+- `URL` - optional for Fasthouse; looked up from the Seller SKU when missing
+- `ASIN` - optional; names the image files
 
-Every other Fasthouse mode does this automatically when the file has no
-`URL` column, so an Amazon export (SKU + ASIN) can be crawled directly.
-            """
-        )
-    with st.expander("About Size Charts mode", expanded=False):
-        st.markdown(
-            """
-In **Images** mode, tick *Add size chart as PT05* to get the chart as
-`ASIN.pt05.png` alongside the gallery images (or the next free slot if
-PT05 is taken). The standalone mode below renders charts only.
+**SKU Lookup** turns a Seller SKU list into product URLs from Fasthouse's
+own catalogue (~5,300 SKUs) without fetching any product page, so it is
+quick - and doubles as a check for which SKUs are still listed and in
+stock. Every other Fasthouse mode does this automatically when the file
+has no `URL` column, so an Amazon export can be crawled directly.
 
-Reads each product's **Kiwi Sizing** chart (the "What's My Size?" pop-up)
-and renders it to a **2000 x 2000 PNG** named `ASIN.SIZE-CHART.png`:
-heading, measurement diagram, *How to Measure* as one step-by-step
-sentence, and the measurement table. Products that share a chart are
-rendered once. The CSV/Excel lists the status, chart name, sizes and
-diagram URL per row.
+**Size charts** come from each product's Kiwi Sizing chart (the "What's
+My Size?" pop-up), rendered to a 2000 x 2000 PNG: heading, measurement
+diagram, *How to Measure* as one sentence, and the table. In *Images*
+mode, *Add size chart as PT05* puts it in that listing slot and shifts
+the gallery down; the standalone *Size Charts* mode renders charts only.
             """
         )
     if not STATIC_SERVING:
         st.caption("Static file serving is off - ZIP parts are served through download buttons one part at a time.")
     elif not BIG_DOWNLOADS:
         st.caption("This Streamlit version caps served files at 200 MB, so large batches are still split into parts.")
+
+    build = version_info()
+    if build.get("commit"):
+        st.caption(f"Build `{build['commit']}` · {build['date']}",
+                   help=build.get("subject") or "The commit this app is running.")
 
 
 # -----------------------
@@ -318,6 +339,23 @@ if df is not None:
         st.error(p)
     for w in warnings:
         st.warning(w)
+
+    if not problems and website == "Fasthouse" and not has_urls:
+        with st.spinner("Checking the SKUs against the Fasthouse catalogue..."):
+            check = sku_precheck(uploaded_file.getvalue())
+        if check is None:
+            st.info("Could not pre-check the SKUs; the crawl will report any that are missing.")
+        elif check["missing"]:
+            st.warning(
+                f"**{check['missing']} of {check['rows']} SKU(s) are not in the Fasthouse "
+                f"catalogue** and will be skipped: "
+                + ", ".join(check["missing_skus"][:12])
+                + ("…" if len(check["missing_skus"]) > 12 else "")
+            )
+            st.caption(f"{check['resolved']} resolved to {check['unique_urls']} product page(s).")
+        else:
+            st.success(f"All {check['resolved']} SKUs matched - {check['unique_urls']} product page(s) to crawl.")
+
     if not problems:
         st.success("File looks good.")
 
@@ -492,17 +530,90 @@ if job.failures:
     with st.expander(f"Failed rows ({len(job.failures)})", expanded=False):
         failed_df = pd.DataFrame(job.failures)
         st.dataframe(failed_df, width="stretch", hide_index=True)
-        st.download_button(
-            "Download failed rows CSV",
+
+        retry_rows = None
+        if job.source_df is not None and "Seller SKU" in job.source_df.columns:
+            wanted = {str(f.get("Seller SKU")) for f in job.failures}
+            retry_rows = job.source_df[job.source_df["Seller SKU"].astype(str).isin(wanted)]
+
+        action, download = st.columns([1, 1])
+        if retry_rows is not None and len(retry_rows):
+            # Most failures are transient CDN stalls, so re-running just
+            # these rows is usually all that is needed.
+            if action.button(f"↻ Re-run these {len(retry_rows)} row(s)", type="primary",
+                             width="stretch", disabled=job.is_active):
+                try:
+                    REGISTRY.start(
+                        website=job.website, crawl_type=job.crawl_type, df=retry_rows,
+                        crawler=CRAWLERS[job.website], workers=job.workers,
+                        assets_dir=ASSETS_DIR, outputs_dir=OUTPUTS_DIR,
+                        downloads_dir=DOWNLOADS_DIR, part_bytes=None if single_zip else part_mb * MB,
+                        options=job.options,
+                    )
+                    st.rerun()
+                except RuntimeError as e:
+                    st.error(str(e))
+            action.caption("Runs the same mode and options on the failed rows only.")
+        download.download_button(
+            "⬇ Download failed rows CSV",
             data=to_csv_bytes(failed_df),
             file_name=f"{job.website}__failed_rows.csv",
             mime="text/csv",
             on_click="ignore",
+            width="stretch",
         )
 
 if out is not None:
-    with st.expander(f"Preview output ({len(out):,} rows)", expanded=False):
-        st.dataframe(out.head(100), width="stretch", hide_index=True)
+    issues, reasons = issue_report(out)
+    n_issues = int(issues.sum())
+    with st.expander(
+        f"Output table - {n_issues:,} of {len(out):,} row(s) need a look" if n_issues
+        else f"Output table ({len(out):,} rows, nothing flagged)",
+        expanded=bool(n_issues),
+    ):
+        only_issues = st.toggle(
+            "Show only rows with issues", value=bool(n_issues), disabled=not n_issues,
+            help="Rows the crawl flagged: failures, bullet mismatches, dropped gallery "
+                 "images, missing size charts, non-white backgrounds, unknown SKUs.",
+        )
+        table = out.copy()
+        table.insert(0, "Issues", reasons)
+        if only_issues and n_issues:
+            table = table[issues]
+        st.dataframe(table.head(200), width="stretch", hide_index=True)
+        if len(table) > 200:
+            st.caption(f"Showing the first 200 of {len(table):,} rows - the CSV has them all.")
+        st.download_button(
+            "⬇ Download flagged rows CSV", data=to_csv_bytes(out[issues].assign(Issues=reasons[issues])),
+            file_name=f"{job.website}__flagged_rows.csv", mime="text/csv",
+            on_click="ignore", disabled=not n_issues,
+        )
+
+    # ---- visual check of what was produced, without downloading the ZIP
+    grouped = group_assets(ASSETS_DIR)
+    if grouped:
+        flagged_asins = set()
+        for column in ("ASIN", "Seller SKU"):
+            if column in out.columns:
+                flagged_asins |= set(out.loc[issues, column].astype(str))
+        with st.expander(f"Preview images ({len(grouped)} product(s))", expanded=False):
+            names = sorted(grouped)
+            default = next((i for i, n in enumerate(names) if n in flagged_asins), 0)
+            picked = st.selectbox(
+                "Product", names, index=default,
+                format_func=lambda n: f"⚠ {n}" if n in flagged_asins else n,
+                help="Files are shown in listing order: MAIN, PT01, PT02 ...",
+            )
+            files = grouped.get(picked, [])
+            st.caption(f"{len(files)} file(s) for `{picked}`")
+            columns = st.columns(min(4, max(1, len(files))))
+            for position, (slot, path) in enumerate(files):
+                with columns[position % len(columns)]:
+                    try:
+                        st.image(thumb(str(path), path.stat().st_mtime),
+                                 caption=f"{(slot or '?').upper()} · {path.suffix.lstrip('.')}")
+                    except Exception as e:  # noqa: BLE001 - one bad file must not break the page
+                        st.caption(f"{slot}: could not preview ({e})")
 
 st.markdown("#### Downloads")
 dl_cols = st.columns([1, 1, 2])

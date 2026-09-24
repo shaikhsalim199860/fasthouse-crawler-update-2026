@@ -58,6 +58,7 @@ class Job:
     log: Deque[str] = field(default_factory=lambda: deque(maxlen=400))
     failures: List[dict] = field(default_factory=list)
     result_df: Optional[pd.DataFrame] = None
+    source_df: Optional[pd.DataFrame] = None
     csv_path: Optional[Path] = None
     xlsx_path: Optional[Path] = None
     zip_parts: List[Path] = field(default_factory=list)
@@ -189,6 +190,7 @@ class JobRegistry:
                 total=len(df),
                 workers=workers,
                 options=dict(options or {}),
+                source_df=df.copy(),
             )
             self.current = job
 

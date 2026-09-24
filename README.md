@@ -20,6 +20,23 @@ request. Rows that fail or lose an image to a transient stall are retried
 once, sequentially, after the main pass; anything still failing is listed
 in the *Failed rows* table and the `Crawl Error` / `Image Errors` columns.
 
+## Reviewing a finished crawl
+
+The results screen is built for checking the output before it goes near
+Amazon:
+
+- **Output table** highlights only the rows the crawl flagged - failures,
+  bullet-count mismatches, dropped gallery images, missing size charts,
+  non-white backgrounds, unknown SKUs - with a per-row *Issues* column and
+  a flagged-rows CSV.
+- **Preview images** shows a product's files as thumbnails in listing
+  order (MAIN, PT01, PT02 ...), so a wrong or duplicated image is visible
+  without downloading the ZIP. Products with issues are marked.
+- **Re-run failed rows** repeats the same mode and options on just the
+  rows that failed, which is usually all a transient stall needs.
+- The sidebar shows the **build** the app is running, so it is obvious
+  whether a deploy has landed.
+
 ## Crawling from a SKU list (Fasthouse)
 
 Fasthouse publishes its catalogue at `/products.json`, and every variant
@@ -121,6 +138,7 @@ The IAM user needs `s3:GetObject`/`s3:PutObject` on the SKU key and its
 | `fasthouse/scrape.py`, `seven/scrape.py` | Site-specific parsing |
 | `fasthouse/sizechart.py` | Kiwi Sizing extraction + 2000x2000 size chart renderer |
 | `fasthouse/catalog.py` | SKU -> product URL index built from the Fasthouse catalogue |
+| `crawler_app/review.py` | Results review: asset thumbnails, issue filter, build version |
 | `crawler_app/awsio.py` / `skucheck_ui.py` | S3 SKU list + Lambda invoke, and the SKU checker UI |
 | `crawler_app/schedule.py` | Reads/edits the EventBridge schedule that fires the checker |
 
