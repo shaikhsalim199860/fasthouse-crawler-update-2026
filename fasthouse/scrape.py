@@ -908,6 +908,32 @@ class RunType(enum.Enum):
     sku_lookup = "sku_lookup"
 
 
+SLOT_ORDER = ["main"] + [f"pt0{i}" for i in range(1, 9)]
+
+
+def _order_image_columns(out: pd.DataFrame) -> pd.DataFrame:
+    """Put the image slot columns in listing order.
+
+    In Images mode the size chart is rendered before the gallery so it can
+    claim PT05, which means its column is created first and the sheet ends
+    up with pt05 ahead of pt01. Readers expect main, pt01, pt02 ... so the
+    block is reordered in place, keeping every other column where it is.
+    """
+    present = [c for c in SLOT_ORDER if c in out.columns]
+    if len(present) < 2:
+        return out
+
+    ordered, emitted = [], False
+    for column in out.columns:
+        if column in present:
+            if not emitted:
+                ordered.extend(present)
+                emitted = True
+            continue
+        ordered.append(column)
+    return out[ordered]
+
+
 def _max_bullets(df: pd.DataFrame) -> int:
     if "No of bullets" not in df.columns:
         return 5
@@ -1122,7 +1148,7 @@ def fetch_text_and_images(
         replicate=replicate,
     )
 
-    out = pd.DataFrame(data)
+    out = _order_image_columns(pd.DataFrame(data))
     if "Size Chart Count" in out.columns:
         out["Size Chart Count"] = pd.to_numeric(out["Size Chart Count"], errors="coerce").fillna(0).astype(int)
 
