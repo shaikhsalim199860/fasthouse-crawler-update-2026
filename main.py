@@ -1,3 +1,4 @@
+import inspect
 import io
 import logging
 from pathlib import Path
@@ -43,6 +44,28 @@ def _enable_big_downloads() -> bool:
 
 
 BIG_DOWNLOADS = _enable_big_downloads()
+
+
+def start_job(**kwargs):
+    """Start a crawl, surviving a stale `crawler_app` after a deploy.
+
+    Streamlit Cloud can reload main.py while keeping already-imported
+    modules in memory, so a newly added keyword argument can hit the old
+    signature and fail with an unhelpful redacted TypeError. Dropping the
+    arguments the running code does not understand keeps the crawl
+    working, and says plainly that a reboot is needed.
+    """
+    supported = set(inspect.signature(REGISTRY.start).parameters)
+    unknown = sorted(k for k in kwargs if k not in supported)
+    if unknown:
+        st.warning(
+            "This app is running an older copy of its modules (missing: "
+            + ", ".join(f"`{k}`" for k in unknown)
+            + "). The crawl will run without those options - **reboot the app** "
+              "(Manage app -> ⋮ -> Reboot) to pick up the deployed code."
+        )
+        kwargs = {k: v for k, v in kwargs.items() if k in supported}
+    return REGISTRY.start(**kwargs)
 
 
 def host_config() -> HostConfig:
@@ -416,7 +439,7 @@ if running:
 
 if run_clicked and df is not None:
     try:
-        job = REGISTRY.start(
+        job = start_job(
             website=website,
             crawl_type=crawl_type,
             df=df,
@@ -574,7 +597,7 @@ if job.failures:
             if action.button(f"↻ Re-run these {len(retry_rows)} row(s)", type="primary",
                              width="stretch", disabled=job.is_active):
                 try:
-                    REGISTRY.start(
+                    start_job(
                         website=job.website, crawl_type=job.crawl_type, df=retry_rows,
                         crawler=CRAWLERS[job.website], workers=job.workers,
                         assets_dir=ASSETS_DIR, outputs_dir=OUTPUTS_DIR,
