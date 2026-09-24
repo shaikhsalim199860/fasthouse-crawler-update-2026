@@ -44,8 +44,11 @@ BIG_DOWNLOADS = _enable_big_downloads()
 
 CRAWLERS = {"Fasthouse": fetch_text_and_images, "Seven": seven_start}
 
-# Rough per-row cost used only for the "estimated time" hint.
-SECONDS_PER_ROW = {"Data": 2.0, "Images": 7.0, "A+ Images": 5.0, "Size Charts": 2.0}
+# Rough per-row cost used only for the "estimated time" hint. `.get` keeps a
+# new crawl type from crashing the page before it is added here.
+SECONDS_PER_ROW = {"Data": 2.0, "Images": 7.0, "A+ Images": 5.0,
+                   "Size Charts": 2.0, "SKU Lookup": 0.05}
+DEFAULT_SECONDS_PER_ROW = 2.0
 
 if not logging.getLogger().handlers:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -292,12 +295,23 @@ if uploaded_file is not None:
 if df is not None:
     problems, warnings = validate(df, website, crawl_type)
 
-    unique_urls = int(df["URL"].astype(str).str.strip().str.lower().nunique()) if "URL" in df.columns else 0
+    has_urls = "URL" in df.columns and df["URL"].astype(str).str.strip().replace("nan", "").any()
+    unique_urls = int(df["URL"].astype(str).str.strip().str.lower().nunique()) if has_urls else None
+    # Without URLs the products are not known until the SKU lookup runs, so
+    # the estimate falls back to the row count - an upper bound, since rows
+    # sharing a product are crawled once.
+    basis = unique_urls if unique_urls is not None else len(df)
+
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Rows", f"{len(df):,}")
-    m2.metric("Unique URLs", f"{unique_urls:,}", help="Each URL is crawled once; size-variant rows sharing a URL reuse the result.")
+    m2.metric(
+        "Unique URLs", f"{unique_urls:,}" if unique_urls is not None else "–",
+        help="Each URL is crawled once; rows sharing a URL reuse the result."
+             if unique_urls is not None else
+             "No URL column - product URLs are looked up from the Seller SKU when the crawl starts.",
+    )
     m3.metric("Columns", len(df.columns))
-    est = unique_urls * SECONDS_PER_ROW[crawl_type] / max(1, workers)
+    est = basis * SECONDS_PER_ROW.get(crawl_type, DEFAULT_SECONDS_PER_ROW) / max(1, workers)
     m4.metric("Estimated time", f"≈ {fmt_duration(est)}", help=f"Rough guess with {workers} worker(s).")
 
     for p in problems:
